@@ -1,0 +1,39 @@
+{
+  "name": "@trademitra/database",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Enterprise PostgreSQL database provider and migrations for TradeMitra",
+  "author": "Sumer Kumar",
+  "license": "UNLICENSED",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "tsc -b -w",
+    "clean": "rimraf dist tsconfig.tsbuildinfo",
+    "lint": "tsc --noEmit",
+    "test": "tsc --noEmit",
+    "db:migrate": "node dist/scripts/migrate.js",
+    "db:seed": "node dist/scripts/seed.js",
+    "db:setup": "node dist/scripts/setup-db.js",
+    "db:reset": "node dist/scripts/reset-db.js"
+  },
+  "dependencies": {
+    "concurrently": "^10.0.5",
+    "dotenv": "^16.4.7",
+    "pg": "^8.13.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.9",
+    "@types/pg": "^8.11.11",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.8.2"
+  }
+}

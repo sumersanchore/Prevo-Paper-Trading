@@ -1,0 +1,32 @@
+{
+  "name": "trademitra-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MNC-grade Paper Trading Platform for Equity & F&O inspired by Groww",
+  "author": "Sumer Kumar",
+  "license": "UNLICENSED",
+  "packageManager": "pnpm@10.34.5",
+  "scripts": {
+    "dev": "concurrently -n \"API,WEB\" -c \"bgBlue.bold,bgGreen.bold\" \"npx pnpm --filter @trademitra/api dev\" \"npx pnpm --filter @trademitra/web dev\"",
+    "api": "npx pnpm --filter @trademitra/api dev",
+    "web": "npx pnpm --filter @trademitra/web dev",
+    "db:reset": "npx pnpm --filter @trademitra/database build && npx pnpm --filter @trademitra/database run db:reset",
+    "db:setup": "npx pnpm --filter @trademitra/database build && npx pnpm --filter @trademitra/database run db:setup",
+    "build": "npx turbo run build",
+    "lint": "npx turbo run lint",
+    "test": "npx turbo run test",
+    "clean": "npx turbo run clean && rimraf node_modules",
+    "format": "npx prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\""
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.5",
+    "prettier": "^3.5.3",
+    "rimraf": "^6.0.1",
+    "turbo": "^2.4.4",
+    "typescript": "^5.8.2"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  }
+}

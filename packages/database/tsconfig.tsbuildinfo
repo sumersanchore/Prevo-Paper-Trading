@@ -1,0 +1,1 @@
+{"root":["./src/config.ts","./src/index.ts","./src/postgres.provider.ts","./src/types.ts","./src/scripts/migrate.ts","./src/scripts/reset-db.ts","./src/scripts/seed.ts","./src/scripts/setup-db.ts","./src/scripts/test-db.ts"],"version":"5.9.3"}
