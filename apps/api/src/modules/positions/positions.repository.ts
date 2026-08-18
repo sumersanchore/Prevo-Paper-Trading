@@ -49,6 +49,16 @@ export class PositionsRepository {
   }
 
   public async getPositionsByUserId(userId: string): Promise<OptionPositionEntity[]> {
+    const posMap = new Map<string, OptionPositionEntity>();
+
+    // 1. Load from in-memory store
+    for (const pos of PositionsRepository.memPositions.values()) {
+      if (pos.userId === userId) {
+        posMap.set(`${pos.contractId}_${pos.productType}`, pos);
+      }
+    }
+
+    // 2. Query database and merge
     try {
       const result = await db.query<IPositionRow>(
         `SELECT id, user_id, contract_id, product_type, net_quantity, buy_quantity, sell_quantity,
@@ -61,15 +71,17 @@ export class PositionsRepository {
       );
 
       if (result.rows.length > 0) {
-        return result.rows.map((r) => this.mapRowToEntity(r));
+        for (const r of result.rows) {
+          const entity = this.mapRowToEntity(r);
+          posMap.set(`${entity.contractId}_${entity.productType}`, entity);
+          PositionsRepository.memPositions.set(`${entity.userId}_${entity.contractId}_${entity.productType}`, entity);
+        }
       }
     } catch {
       // Fallback
     }
 
-    return Array.from(PositionsRepository.memPositions.values()).filter(
-      (p) => p.userId === userId
-    );
+    return Array.from(posMap.values());
   }
 
   public async getPositionForUpdate(
@@ -91,7 +103,9 @@ export class PositionsRepository {
         );
 
         if (result.rows.length > 0) {
-          return this.mapRowToEntity(result.rows[0]!);
+          const entity = this.mapRowToEntity(result.rows[0]!);
+          PositionsRepository.memPositions.set(`${userId}_${contractId}_${productType}`, entity);
+          return entity;
         }
       }
     } catch {
@@ -118,6 +132,28 @@ export class PositionsRepository {
       productType: 'NRML' | 'MIS';
     }
   ): Promise<OptionPositionEntity> {
+    const key = `${position.userId}_${position.contractId}_${position.productType}`;
+    const existing = PositionsRepository.memPositions.get(key);
+    const updated: OptionPositionEntity = {
+      id: existing?.id ?? String(Date.now()),
+      userId: position.userId,
+      contractId: position.contractId,
+      productType: position.productType,
+      netQuantity: position.netQuantity ?? existing?.netQuantity ?? 0,
+      buyQuantity: position.buyQuantity ?? existing?.buyQuantity ?? 0,
+      sellQuantity: position.sellQuantity ?? existing?.sellQuantity ?? 0,
+      buyAmount: position.buyAmount ?? existing?.buyAmount ?? 0,
+      sellAmount: position.sellAmount ?? existing?.sellAmount ?? 0,
+      averageBuyPrice: position.averageBuyPrice ?? existing?.averageBuyPrice ?? 0,
+      averageSellPrice: position.averageSellPrice ?? existing?.averageSellPrice ?? 0,
+      realizedPnl: position.realizedPnl ?? existing?.realizedPnl ?? 0,
+      status: (position.netQuantity ?? existing?.netQuantity ?? 0) === 0 ? 'CLOSED' : 'OPEN',
+      createdAt: existing?.createdAt ?? new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    PositionsRepository.memPositions.set(key, updated);
+
     try {
       if (client) {
         const result = await client.query<IPositionRow>(
@@ -145,47 +181,28 @@ export class PositionsRepository {
             position.userId,
             position.contractId,
             position.productType,
-            position.netQuantity ?? 0,
-            position.buyQuantity ?? 0,
-            position.sellQuantity ?? 0,
-            position.buyAmount ?? 0,
-            position.sellAmount ?? 0,
-            position.averageBuyPrice ?? 0,
-            position.averageSellPrice ?? 0,
-            position.realizedPnl ?? 0,
-            position.status ?? 'OPEN',
+            updated.netQuantity,
+            updated.buyQuantity,
+            updated.sellQuantity,
+            updated.buyAmount,
+            updated.sellAmount,
+            updated.averageBuyPrice,
+            updated.averageSellPrice,
+            updated.realizedPnl,
+            updated.status,
           ]
         );
 
         if (result.rows.length > 0) {
-          return this.mapRowToEntity(result.rows[0]!);
+          const dbEntity = this.mapRowToEntity(result.rows[0]!);
+          PositionsRepository.memPositions.set(key, dbEntity);
+          return dbEntity;
         }
       }
     } catch {
       // Fallback
     }
 
-    const key = `${position.userId}_${position.contractId}_${position.productType}`;
-    const existing = PositionsRepository.memPositions.get(key);
-    const updated: OptionPositionEntity = {
-      id: existing?.id ?? String(Date.now()),
-      userId: position.userId,
-      contractId: position.contractId,
-      productType: position.productType,
-      netQuantity: position.netQuantity ?? existing?.netQuantity ?? 0,
-      buyQuantity: position.buyQuantity ?? existing?.buyQuantity ?? 0,
-      sellQuantity: position.sellQuantity ?? existing?.sellQuantity ?? 0,
-      buyAmount: position.buyAmount ?? existing?.buyAmount ?? 0,
-      sellAmount: position.sellAmount ?? existing?.sellAmount ?? 0,
-      averageBuyPrice: position.averageBuyPrice ?? existing?.averageBuyPrice ?? 0,
-      averageSellPrice: position.averageSellPrice ?? existing?.averageSellPrice ?? 0,
-      realizedPnl: position.realizedPnl ?? existing?.realizedPnl ?? 0,
-      status: (position.netQuantity ?? existing?.netQuantity ?? 0) === 0 ? 'CLOSED' : 'OPEN',
-      createdAt: existing?.createdAt ?? new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-
-    PositionsRepository.memPositions.set(key, updated);
     return updated;
   }
 }

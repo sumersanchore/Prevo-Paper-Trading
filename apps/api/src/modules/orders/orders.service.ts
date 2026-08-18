@@ -46,11 +46,29 @@ export class OrdersService {
       throw new ValidationError(`Quantity must be a multiple of lot size (${contract.lotSize}).`);
     }
 
-    // 2. Fetch current LTP for price calculation
     const tick = this.feedProvider.getLatestTick(contract.tradingSymbol);
     const ltp = tick?.ltp ?? (contract.optionType === 'CE' ? 120.5 : 95.2);
     const executionPrice = dto.orderType === 'MARKET' ? ltp : dto.price ?? ltp;
-    const requiredMargin = Number((dto.quantity * executionPrice).toFixed(2));
+
+    // Strict Stop Loss & Target validation for BUY orders
+    if (dto.transactionType === 'BUY') {
+      if (dto.triggerPrice !== undefined && dto.triggerPrice > 0 && dto.triggerPrice >= executionPrice) {
+        throw new ValidationError(
+          `Stop Loss price (₹${dto.triggerPrice.toFixed(2)}) cannot be greater than or equal to Buy price (₹${executionPrice.toFixed(2)}). Stop loss must be below your buy amount.`
+        );
+      }
+      if (dto.targetPrice !== undefined && dto.targetPrice > 0 && dto.targetPrice <= executionPrice) {
+        throw new ValidationError(
+          `Target price (₹${dto.targetPrice.toFixed(2)}) must be greater than Buy price (₹${executionPrice.toFixed(2)}).`
+        );
+      }
+    }
+    
+    // Standard Indian F&O Option Selling SPAN Margin per lot (~₹1,15,000 / lot)
+    const OPTION_SELLING_MARGIN_PER_LOT = 115000;
+    const lotSize = contract.lotSize || 25;
+    const lots = Math.max(1, Math.round(dto.quantity / lotSize));
+    const premiumTurnover = Number((dto.quantity * executionPrice).toFixed(2));
 
     // 3. Execute financial transaction with row-level locking
     const executeOrderInTx = async (client: any = null): Promise<OptionOrderEntity> => {
@@ -61,12 +79,6 @@ export class OrdersService {
 
       if (!wallet) throw new NotFoundError('User wallet not found.');
 
-      if (dto.transactionType === 'BUY' && wallet.availableMargin < requiredMargin) {
-        throw new InsufficientFundsError(
-          `Insufficient margin. Required: ₹${requiredMargin.toLocaleString('en-IN')}, Available: ₹${wallet.availableMargin.toLocaleString('en-IN')}`
-        );
-      }
-
       // Lock existing Position
       const existingPos = await this.positionsRepo.getPositionForUpdate(
         client,
@@ -74,6 +86,23 @@ export class OrdersService {
         contract.id,
         dto.productType
       );
+
+      const isClosingLong = dto.transactionType === 'SELL' && existingPos && existingPos.netQuantity > 0;
+      const isClosingShort = dto.transactionType === 'BUY' && existingPos && existingPos.netQuantity < 0;
+
+      // Required Margin:
+      // - BUY: Premium required (if not closing short)
+      // - SELL: SPAN margin required (if opening fresh short, 0 if closing long)
+      const requiredMargin =
+        dto.transactionType === 'BUY'
+          ? (isClosingShort ? 0 : premiumTurnover)
+          : (isClosingLong ? 0 : Number((lots * OPTION_SELLING_MARGIN_PER_LOT).toFixed(2)));
+
+      if (requiredMargin > 0 && wallet.availableMargin < requiredMargin) {
+        throw new InsufficientFundsError(
+          `Insufficient margin. Required: ₹${requiredMargin.toLocaleString('en-IN')}, Available: ₹${wallet.availableMargin.toLocaleString('en-IN')}`
+        );
+      }
 
       const isMarket = dto.orderType === 'MARKET';
       const orderStatus = isMarket ? 'EXECUTED' : 'PENDING';
@@ -91,6 +120,7 @@ export class OrdersService {
         quantity: dto.quantity,
         price: dto.price,
         triggerPrice: dto.triggerPrice,
+        targetPrice: dto.targetPrice,
         trailingStopLoss: dto.trailingStopLoss,
         averagePrice: avgPrice,
         status: orderStatus,
@@ -99,10 +129,23 @@ export class OrdersService {
 
       if (isMarket) {
         // Update Wallet Margin
-        const newUtilized =
-          dto.transactionType === 'BUY'
-            ? wallet.utilizedMargin + requiredMargin
-            : Math.max(0, wallet.utilizedMargin - requiredMargin);
+        let newUtilized = wallet.utilizedMargin;
+        if (dto.transactionType === 'BUY') {
+          if (isClosingShort) {
+            const closingLots = Math.ceil(Math.min(dto.quantity, Math.abs(existingPos.netQuantity)) / lotSize);
+            newUtilized = Math.max(0, wallet.utilizedMargin - (closingLots * OPTION_SELLING_MARGIN_PER_LOT));
+          } else {
+            newUtilized = wallet.utilizedMargin + requiredMargin;
+          }
+        } else {
+          // SELL transaction
+          if (isClosingLong) {
+            const closingBuyAmt = Math.min(dto.quantity, existingPos.netQuantity) * existingPos.averageBuyPrice;
+            newUtilized = Math.max(0, wallet.utilizedMargin - closingBuyAmt);
+          } else {
+            newUtilized = wallet.utilizedMargin + requiredMargin;
+          }
+        }
 
         await this.walletRepo.updateWalletBalances(
           client,
@@ -159,6 +202,48 @@ export class OrdersService {
           realizedPnl: Number(realizedPnl.toFixed(2)),
           status: netQty === 0 ? 'CLOSED' : 'OPEN',
         });
+
+        // 1. If position is manually closed (netQty === 0), auto-cancel any existing pending SL/Target protection orders
+        if (netQty === 0) {
+          const userOrders = await this.ordersRepo.getOrdersByUserId(userId, 'PENDING');
+          for (const pendingOrd of userOrders) {
+            if (pendingOrd.contractId === contract.id && pendingOrd.productType === dto.productType) {
+              logger.info(
+                `[BracketEngine] Position closed. Auto-cancelling orphaned protection order #${pendingOrd.id} (${pendingOrd.orderType})`
+              );
+              await this.ordersRepo.updateOrder(client, pendingOrd.id, {
+                status: 'CANCELLED',
+                rejectionReason: 'Position closed by user exit',
+              });
+            }
+          }
+        }
+
+        // 2. Bracket Order: If BUY/SELL order has Stop Loss or Target Price, auto-create the pending protection order
+        if (dto.triggerPrice || dto.targetPrice) {
+          const exitTrigger = dto.triggerPrice;
+          const exitTarget = dto.targetPrice;
+          const exitTrail = dto.trailingStopLoss;
+          const reverseAction = dto.transactionType === 'BUY' ? 'SELL' : 'BUY';
+
+          logger.info(
+            `[BracketEngine] Creating automated exit protection order for ${dto.transactionType} trade #${order.id}: SL: ₹${exitTrigger}, Target: ₹${exitTarget}, Trail: ₹${exitTrail}`
+          );
+
+          await this.ordersRepo.createOrder(client, {
+            userId,
+            contractId: contract.id,
+            orderType: exitTrigger ? 'SL-M' : 'LIMIT',
+            transactionType: reverseAction,
+            productType: dto.productType,
+            quantity: dto.quantity,
+            price: exitTarget || executionPrice,
+            triggerPrice: exitTrigger,
+            targetPrice: exitTarget,
+            trailingStopLoss: exitTrail,
+            status: 'PENDING',
+          });
+        }
       }
 
       return order;
@@ -174,7 +259,30 @@ export class OrdersService {
   }
 
   public async getUserOrders(userId: string, status?: string): Promise<OptionOrderEntity[]> {
-    return this.ordersRepo.getOrdersByUserId(userId, status);
+    const orders = await this.ordersRepo.getOrdersByUserId(userId, status);
+    
+    // Enrich orders with live market contract details & tick LTP
+    return Promise.all(
+      orders.map(async (order) => {
+        try {
+          const contract = await this.contractsRepo.getContractById(order.contractId);
+          if (contract) {
+            const tick = this.feedProvider.getLatestTick(contract.tradingSymbol);
+            return {
+              ...order,
+              tradingSymbol: contract.tradingSymbol,
+              strikePrice: contract.strikePrice,
+              optionType: contract.optionType,
+              symbol: contract.symbol,
+              ltp: tick?.ltp ?? contract.strikePrice,
+            };
+          }
+        } catch {
+          // Keep raw order if lookup fails
+        }
+        return order;
+      })
+    );
   }
 
   public async getOrderById(id: string): Promise<OptionOrderEntity> {
@@ -186,7 +294,7 @@ export class OrdersService {
   public async modifyOrder(
     userId: string,
     orderId: string,
-    dto: { price?: number; triggerPrice?: number; trailingStopLoss?: number; quantity?: number }
+    dto: { price?: number; triggerPrice?: number; targetPrice?: number; trailingStopLoss?: number; quantity?: number }
   ): Promise<OptionOrderEntity> {
     const existing = await this.ordersRepo.getOrderById(orderId);
     if (!existing || existing.userId !== userId) {
@@ -196,9 +304,26 @@ export class OrdersService {
       throw new ValidationError('Only PENDING orders can be modified.');
     }
 
+    const orderExecPrice = dto.price ?? existing.price ?? existing.averagePrice ?? 0;
+    const isBuy = existing.transactionType === 'BUY';
+
+    if (isBuy && orderExecPrice > 0) {
+      if (dto.triggerPrice !== undefined && dto.triggerPrice > 0 && dto.triggerPrice >= orderExecPrice) {
+        throw new ValidationError(
+          `Stop Loss price (₹${dto.triggerPrice.toFixed(2)}) cannot be greater than or equal to Buy price (₹${orderExecPrice.toFixed(2)}). Stop loss must be below your buy amount.`
+        );
+      }
+      if (dto.targetPrice !== undefined && dto.targetPrice > 0 && dto.targetPrice <= orderExecPrice) {
+        throw new ValidationError(
+          `Target price (₹${dto.targetPrice.toFixed(2)}) must be greater than Buy price (₹${orderExecPrice.toFixed(2)}).`
+        );
+      }
+    }
+
     const updated = await this.ordersRepo.updateOrder(null, orderId, {
       price: dto.price,
       triggerPrice: dto.triggerPrice,
+      targetPrice: dto.targetPrice,
       trailingStopLoss: dto.trailingStopLoss,
       quantity: dto.quantity,
     });
@@ -259,37 +384,40 @@ export class OrdersService {
         ) {
           const trailStep = order.trailingStopLoss;
 
-          // For SELL stop-loss (protecting Long position)
+          // For SELL stop-loss (protecting Long BUY position)
           if (order.transactionType === 'SELL') {
-            // Check if current LTP moved higher than triggerPrice + trailStep
-            const distance = currentLtp - order.triggerPrice;
-            if (distance > trailStep) {
-              const newTriggerPrice = Number((currentLtp - trailStep).toFixed(2));
-              if (newTriggerPrice > order.triggerPrice) {
-                logger.info(
-                  `[TrailingSL] Trailing trigger price UP for Order #${order.id} (${contract.tradingSymbol}): ₹${order.triggerPrice} -> ₹${newTriggerPrice} (LTP: ₹${currentLtp})`
-                );
-                await this.ordersRepo.updateOrder(null, order.id, {
-                  triggerPrice: newTriggerPrice,
-                });
-                order.triggerPrice = newTriggerPrice;
-              }
+            // Formula: If price is above triggerPrice + trailStep, trail the SL up so distance = trailStep
+            // E.g. BUY @ 260, SL = 210 (distance 50). If LTP rises to 280, new SL = 280 - 50 = 230!
+            const newTrigger = Number((currentLtp - trailStep).toFixed(2));
+            if (newTrigger > order.triggerPrice) {
+              const oldTrigger = order.triggerPrice;
+              logger.info(
+                `[TrailingSL] Trailing trigger price UP for Order #${order.id} (${contract.tradingSymbol}): ₹${oldTrigger} -> ₹${newTrigger} (LTP: ₹${currentLtp}, Trail: ₹${trailStep})`
+              );
+              await this.ordersRepo.updateOrder(null, order.id, {
+                triggerPrice: newTrigger,
+              });
+              order.triggerPrice = newTrigger;
+
+              // Broadcast live SL trigger update to frontend
+              this.feedProvider.emit('order:update', { userId: order.userId, orderId: order.id });
             }
           }
-          // For BUY stop-loss (protecting Short position)
+          // For BUY stop-loss (protecting Short SELL position)
           else if (order.transactionType === 'BUY') {
-            const distance = order.triggerPrice - currentLtp;
-            if (distance > trailStep) {
-              const newTriggerPrice = Number((currentLtp + trailStep).toFixed(2));
-              if (newTriggerPrice < order.triggerPrice) {
-                logger.info(
-                  `[TrailingSL] Trailing trigger price DOWN for Short Order #${order.id}: ₹${order.triggerPrice} -> ₹${newTriggerPrice} (LTP: ₹${currentLtp})`
-                );
-                await this.ordersRepo.updateOrder(null, order.id, {
-                  triggerPrice: newTriggerPrice,
-                });
-                order.triggerPrice = newTriggerPrice;
-              }
+            const newTrigger = Number((currentLtp + trailStep).toFixed(2));
+            if (newTrigger < order.triggerPrice) {
+              const oldTrigger = order.triggerPrice;
+              logger.info(
+                `[TrailingSL] Trailing trigger price DOWN for Short Order #${order.id}: ₹${oldTrigger} -> ₹${newTrigger} (LTP: ₹${currentLtp}, Trail: ₹${trailStep})`
+              );
+              await this.ordersRepo.updateOrder(null, order.id, {
+                triggerPrice: newTrigger,
+              });
+              order.triggerPrice = newTrigger;
+
+              // Broadcast live SL trigger update to frontend
+              this.feedProvider.emit('order:update', { userId: order.userId, orderId: order.id });
             }
           }
         }
@@ -309,6 +437,22 @@ export class OrdersService {
             else if (order.transactionType === 'BUY' && currentLtp >= order.triggerPrice) {
               shouldTrigger = true;
               executionPrice = order.orderType === 'SL-M' ? currentLtp : (order.price ?? currentLtp);
+            }
+          }
+
+          // Target Profit Exit
+          if (!shouldTrigger && order.targetPrice) {
+            // SELL Target (Target hit on price rise: currentLtp >= targetPrice)
+            if (order.transactionType === 'SELL' && currentLtp >= order.targetPrice) {
+              shouldTrigger = true;
+              executionPrice = currentLtp;
+              logger.info(`[TargetEngine] Target Profit hit for Order #${order.id} at LTP ₹${currentLtp} >= Target ₹${order.targetPrice}`);
+            }
+            // BUY Target (Short target hit on price drop: currentLtp <= targetPrice)
+            else if (order.transactionType === 'BUY' && currentLtp <= order.targetPrice) {
+              shouldTrigger = true;
+              executionPrice = currentLtp;
+              logger.info(`[TargetEngine] Short Target Profit hit for Order #${order.id} at LTP ₹${currentLtp} <= Target ₹${order.targetPrice}`);
             }
           }
         } else if (order.orderType === 'LIMIT') {
@@ -404,6 +548,52 @@ export class OrdersService {
             realizedPnl: Number(realizedPnl.toFixed(2)),
             status: netQty === 0 ? 'CLOSED' : 'OPEN',
           });
+
+          // Bracket Order for LIMIT Entry: If BUY LIMIT order just filled and had SL/Target, create the pending protection order
+          if (order.transactionType === 'BUY' && (order.triggerPrice || order.targetPrice)) {
+            const exitTrigger = order.triggerPrice;
+            const exitTarget = order.targetPrice;
+            const exitTrail = order.trailingStopLoss;
+
+            logger.info(
+              `[BracketEngine] LIMIT Buy Order #${order.id} executed at ₹${executionPrice}. Auto-creating pending protection order: SL: ₹${exitTrigger}, Target: ₹${exitTarget}, Trail: ₹${exitTrail}`
+            );
+
+            await this.ordersRepo.createOrder(null, {
+              userId: order.userId,
+              contractId: contract.id,
+              orderType: exitTrigger ? 'SL-M' : 'LIMIT',
+              transactionType: 'SELL',
+              productType: order.productType,
+              quantity: order.quantity,
+              price: exitTarget,
+              triggerPrice: exitTrigger,
+              targetPrice: exitTarget,
+              trailingStopLoss: exitTrail,
+              status: 'PENDING',
+            });
+
+            this.feedProvider.emit('order:update', { userId: order.userId });
+          }
+
+          // If position became CLOSED (netQty === 0), auto-cancel any remaining pending orders for this contract
+          if (netQty === 0) {
+            const userOrders = await this.ordersRepo.getOrdersByUserId(order.userId, 'PENDING');
+            for (const pendingOrd of userOrders) {
+              if (pendingOrd.contractId === contract.id && pendingOrd.id !== order.id) {
+                logger.info(
+                  `[OrderExecutionEngine] Position closed via execution. Auto-cancelling leftover order #${pendingOrd.id}`
+                );
+                await this.ordersRepo.updateOrder(null, pendingOrd.id, {
+                  status: 'CANCELLED',
+                  rejectionReason: 'Position closed by automated execution',
+                });
+              }
+            }
+          }
+
+          // Broadcast order execution event
+          this.feedProvider.emit('order:update', { userId: order.userId });
         }
       }
     } catch (err: any) {

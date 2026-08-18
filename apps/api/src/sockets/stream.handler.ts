@@ -50,6 +50,16 @@ export class SocketStreamHandler {
       this.io.emit('index:tick', indexData);
     });
 
+    this.feedProvider.on('contract_ticks_batch', (batch: LiveTickData[]) => {
+      this.io.emit('ticks:batch', batch);
+      // Fast sub-millisecond asynchronous matching for active pending orders
+      if (batch.length > 0) {
+        Promise.all(batch.map((t) => this.ordersService.processTickForOrders(t))).catch((err) => {
+          logger.error(`[SocketStream] Error in batch tick matching: ${err?.message}`);
+        });
+      }
+    });
+
     this.feedProvider.on('contract_tick', (tickData: LiveTickData) => {
       this.io.emit('tick:update', tickData);
       this.io.to(`symbol:${tickData.tradingSymbol}`).emit('tick:update', tickData);
@@ -57,6 +67,10 @@ export class SocketStreamHandler {
       this.ordersService.processTickForOrders(tickData).catch((err) => {
         logger.error(`[SocketStream] Error processing live tick matching: ${err?.message}`);
       });
+    });
+
+    this.feedProvider.on('order:update', (data: any) => {
+      this.io.emit('order:update', data);
     });
   }
 

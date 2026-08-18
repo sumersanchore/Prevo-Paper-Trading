@@ -139,7 +139,13 @@ export class ContractsRepository {
     return ContractsRepository.fallbackContracts.filter((c) => c.symbol === symbol);
   }
 
+  private static readonly contractCache = new Map<string, OptionsContractEntity>();
+
   public async getContractById(id: string): Promise<OptionsContractEntity | null> {
+    if (ContractsRepository.contractCache.has(id)) {
+      return ContractsRepository.contractCache.get(id)!;
+    }
+
     // 1. Check if ID is a dynamic trading symbol reference (e.g. dyn_NIFTY_25AUG_24250_CE)
     if (id.startsWith('dyn_')) {
       const tradingSymbol = id.replace('dyn_', '');
@@ -149,7 +155,7 @@ export class ContractsRepository {
         const strike = parseFloat(parts[2]!);
         const optionType = parts[3]! as 'CE' | 'PE';
         const lotSize = symbol === 'BANKNIFTY' ? 15 : 25;
-        return {
+        const entity: OptionsContractEntity = {
           id,
           symbol,
           tradingSymbol,
@@ -163,6 +169,9 @@ export class ContractsRepository {
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         };
+        ContractsRepository.contractCache.set(id, entity);
+        ContractsRepository.contractCache.set(tradingSymbol, entity);
+        return entity;
       }
     }
 
@@ -175,12 +184,22 @@ export class ContractsRepository {
       );
 
       if (result.rows.length > 0) {
-        return this.mapRowToEntity(result.rows[0]!);
+        const entity = this.mapRowToEntity(result.rows[0]!);
+        ContractsRepository.contractCache.set(id, entity);
+        ContractsRepository.contractCache.set(entity.id, entity);
+        ContractsRepository.contractCache.set(entity.tradingSymbol, entity);
+        return entity;
       }
     } catch {
       // Fallback
     }
 
-    return ContractsRepository.fallbackContracts.find((c) => c.id === id || c.tradingSymbol === id) ?? null;
+    const fallback = ContractsRepository.fallbackContracts.find((c) => c.id === id || c.tradingSymbol === id) ?? null;
+    if (fallback) {
+      ContractsRepository.contractCache.set(id, fallback);
+      ContractsRepository.contractCache.set(fallback.id, fallback);
+      ContractsRepository.contractCache.set(fallback.tradingSymbol, fallback);
+    }
+    return fallback;
   }
 }

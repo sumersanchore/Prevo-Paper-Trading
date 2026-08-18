@@ -203,6 +203,8 @@ export class McpFeedProvider extends EventEmitter {
    * Recalculates option prices dynamically from current spot price and real calendar expiries
    */
   public recalculateOptionStrikes(): void {
+    const updatedTicksBatch: LiveTickData[] = [];
+
     // 1. DYNAMIC NIFTY OPTION SERIES (Thursday weekly settlement)
     const niftyExpiries = getDynamicExpiries('NIFTY', 8);
     const niftySpot = this.indexCache.get('NIFTY 50')?.ltp || 24154.90;
@@ -233,7 +235,7 @@ export class McpFeedProvider extends EventEmitter {
           timestamp: new Date().toISOString(),
         };
         this.ticksCache.set(ceSymbol, ceTick);
-        this.emit('contract_tick', ceTick);
+        updatedTicksBatch.push(ceTick);
 
         // Dynamic Put (PE)
         const pePricing = calculateOptionPricing(niftySpot, strike, 'PE', exp.daysToExpiry);
@@ -258,7 +260,7 @@ export class McpFeedProvider extends EventEmitter {
           timestamp: new Date().toISOString(),
         };
         this.ticksCache.set(peSymbol, peTick);
-        this.emit('contract_tick', peTick);
+        updatedTicksBatch.push(peTick);
       }
     }
 
@@ -292,7 +294,7 @@ export class McpFeedProvider extends EventEmitter {
           timestamp: new Date().toISOString(),
         };
         this.ticksCache.set(ceSymbol, ceTick);
-        this.emit('contract_tick', ceTick);
+        updatedTicksBatch.push(ceTick);
 
         // Dynamic Put (PE)
         const pePricing = calculateOptionPricing(bankSpot, strike, 'PE', exp.daysToExpiry);
@@ -317,8 +319,13 @@ export class McpFeedProvider extends EventEmitter {
           timestamp: new Date().toISOString(),
         };
         this.ticksCache.set(peSymbol, peTick);
-        this.emit('contract_tick', peTick);
+        updatedTicksBatch.push(peTick);
       }
+    }
+
+    // Emit whole batch in a single high-speed event to eliminate frontend UI stutter/freezing
+    if (updatedTicksBatch.length > 0) {
+      this.emit('contract_ticks_batch', updatedTicksBatch);
     }
   }
 
@@ -413,14 +420,42 @@ export class McpFeedProvider extends EventEmitter {
   public startLiveFeed(): void {
     if (this.pollIntervalId) return;
 
-    logger.info('[McpFeedProvider] Starting Official Real Market Feed (NSE/BSE)...');
+    logger.info('[McpFeedProvider] Starting Official Real Market Feed with Live Tick Momentum Engine...');
     this.syncRealMarketData();
 
+    // 1. Live Web sync interval for real market prices
     this.pollIntervalId = setInterval(() => {
       if (this.isMarketOpen()) {
         this.syncRealMarketData();
       }
     }, 5000);
+
+    // 2. Micro-Momentum Live Generator (Ideal for Paper Trading & Testing Stop-loss / Trailing SL)
+    setInterval(() => {
+      // Generate realistic price oscillation (0.02% to 0.05% fluctuation around live base)
+      for (const [key, index] of this.indexCache.entries()) {
+        // Random micro tick between -0.04% and +0.04%
+        const deltaPct = (Math.random() - 0.49) * 0.0008;
+        const newLtp = Number((index.ltp * (1 + deltaPct)).toFixed(2));
+        const change = Number((newLtp - index.close).toFixed(2));
+        const pChange = Number(((change / index.close) * 100).toFixed(2));
+
+        const updated: MarketIndexData = {
+          ...index,
+          ltp: newLtp,
+          high: Math.max(index.high, newLtp),
+          low: Math.min(index.low, newLtp),
+          change,
+          pChange,
+          timestamp: new Date().toISOString(),
+        };
+
+        this.indexCache.set(key, updated);
+        this.emit('index_tick', updated);
+      }
+
+      this.recalculateOptionStrikes();
+    }, 1500);
   }
 
   public getLatestTick(tradingSymbol: string): LiveTickData | undefined {

@@ -252,7 +252,7 @@ export const OptionChainTable: React.FC = () => {
             </div>
 
             {/* Option Chain strikes grid */}
-            <div className="flex-1 overflow-x-hidden">
+            <div className="flex-1 overflow-x-hidden pb-24 sm:pb-8">
               <table className="w-full text-center border-collapse">
                 <thead>
                   {/* Outer columns headings */}

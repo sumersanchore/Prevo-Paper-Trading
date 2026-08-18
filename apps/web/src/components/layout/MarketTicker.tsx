@@ -3,8 +3,21 @@ import { TrendingUp, TrendingDown } from 'lucide-react';
 import { useTradingStore } from '../../app/store/useTradingStore.js';
 import { formatNumber } from '../../lib/utils.js';
 
+// Maps the display symbol name → API symbol used in fetchOptionChain
+const SYMBOL_MAP: Record<string, string> = {
+  'NIFTY 50': 'NIFTY',
+  'BANK NIFTY': 'BANKNIFTY',
+  'SENSEX': 'SENSEX',
+};
+
 export const MarketTicker: React.FC = () => {
-  const { indices } = useTradingStore();
+  const { indices, setActiveTab, fetchOptionChain } = useTradingStore();
+
+  const handleCardClick = async (idxSymbol: string) => {
+    const apiSymbol = SYMBOL_MAP[idxSymbol] ?? 'NIFTY';
+    await fetchOptionChain(apiSymbol);
+    setActiveTab('option-chain');
+  };
 
   return (
     <div className="bg-[#0f111a] border-b border-groww-border py-2 px-4 sm:px-6 lg:px-8">
@@ -15,7 +28,9 @@ export const MarketTicker: React.FC = () => {
             return (
               <div
                 key={idx.symbol}
-                className="flex items-center gap-3 bg-groww-card/80 hover:bg-groww-surface border border-groww-border px-3.5 py-1.5 rounded-lg transition-all cursor-pointer"
+                onClick={() => handleCardClick(idx.symbol)}
+                className="flex items-center gap-3 bg-groww-card/80 hover:bg-groww-surface border border-groww-border px-3.5 py-1.5 rounded-lg transition-all cursor-pointer select-none active:scale-95"
+                title={`View ${idx.name} Option Chain`}
               >
                 <div className="flex items-center gap-1.5">
                   <span className="text-xs font-semibold text-white tracking-tight">

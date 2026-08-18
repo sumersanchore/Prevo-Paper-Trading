@@ -35,6 +35,7 @@ export const PlaceOrderSchema = z.object({
   quantity: z.number().int().positive('Quantity must be a positive integer'),
   price: z.number().positive('Price must be greater than 0').optional(),
   triggerPrice: z.number().positive('Trigger price must be greater than 0').optional(),
+  targetPrice: z.number().positive('Target price must be greater than 0').optional(),
   trailingStopLoss: z.number().positive('Trailing stop loss must be greater than 0').optional(),
   clientOrderId: z.string().uuid('Invalid clientOrderId UUID format').optional(),
 }).refine((data) => {
@@ -58,6 +59,7 @@ export const PlaceOrderSchema = z.object({
 export const ModifyOrderSchema = z.object({
   price: z.number().positive('Price must be greater than 0').optional(),
   triggerPrice: z.number().positive('Trigger price must be greater than 0').optional(),
+  targetPrice: z.number().positive('Target price must be greater than 0').optional(),
   trailingStopLoss: z.number().positive('Trailing stop loss must be greater than 0').optional(),
   quantity: z.number().int().positive('Quantity must be a positive integer').optional(),
 });

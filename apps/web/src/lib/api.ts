@@ -1,17 +1,73 @@
 import axios from 'axios';
 
 const TOKEN_STORAGE_KEY = 'trademitra_jwt_token';
+const USER_STORAGE_KEY = 'trademitra_user_profile';
+const TAB_STORAGE_KEY = 'trademitra_active_tab';
 
 export const getStoredToken = (): string | null => {
-  return localStorage.getItem(TOKEN_STORAGE_KEY);
+  try {
+    return localStorage.getItem(TOKEN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
 };
 
 export const setStoredToken = (token: string): void => {
-  localStorage.setItem(TOKEN_STORAGE_KEY, token);
+  try {
+    localStorage.setItem(TOKEN_STORAGE_KEY, token);
+  } catch {
+    // Ignore storage quota errors
+  }
+};
+
+export const getStoredUser = (): any | null => {
+  try {
+    const raw = localStorage.getItem(USER_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+};
+
+export const setStoredUser = (user: any): void => {
+  try {
+    if (user) {
+      localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(user));
+    } else {
+      localStorage.removeItem(USER_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage quota errors
+  }
 };
 
 export const clearStoredToken = (): void => {
-  localStorage.removeItem(TOKEN_STORAGE_KEY);
+  try {
+    localStorage.removeItem(TOKEN_STORAGE_KEY);
+    localStorage.removeItem(USER_STORAGE_KEY);
+  } catch {
+    // Ignore
+  }
+};
+
+export const getStoredTab = (): 'option-chain' | 'positions' | 'orders' | 'watchlist' => {
+  try {
+    const stored = localStorage.getItem(TAB_STORAGE_KEY);
+    if (stored === 'option-chain' || stored === 'positions' || stored === 'orders' || stored === 'watchlist') {
+      return stored;
+    }
+  } catch {
+    // Fallback
+  }
+  return 'option-chain';
+};
+
+export const setStoredTab = (tab: string): void => {
+  try {
+    localStorage.setItem(TAB_STORAGE_KEY, tab);
+  } catch {
+    // Ignore
+  }
 };
 
 export const apiClient = axios.create({
@@ -49,6 +105,9 @@ export const api = {
     if (res.data?.data?.token) {
       setStoredToken(res.data.data.token);
     }
+    if (res.data?.data?.user) {
+      setStoredUser(res.data.data.user);
+    }
     return res.data.data;
   },
 
@@ -57,11 +116,17 @@ export const api = {
     if (res.data?.data?.token) {
       setStoredToken(res.data.data.token);
     }
+    if (res.data?.data?.user) {
+      setStoredUser(res.data.data.user);
+    }
     return res.data.data;
   },
 
   getMe: async () => {
     const res = await apiClient.get('/auth/me');
+    if (res.data?.data?.user) {
+      setStoredUser(res.data.data.user);
+    }
     return res.data.data;
   },
 
@@ -110,12 +175,23 @@ export const api = {
     quantity: number;
     price?: number;
     triggerPrice?: number;
+    targetPrice?: number;
+    trailingStopLoss?: number;
   }) => {
     const res = await apiClient.post('/orders', payload);
     return res.data.data;
   },
 
-  modifyOrder: async (orderId: string, payload: { price?: number; triggerPrice?: number; quantity?: number }) => {
+  modifyOrder: async (
+    orderId: string,
+    payload: {
+      price?: number;
+      triggerPrice?: number;
+      targetPrice?: number;
+      trailingStopLoss?: number;
+      quantity?: number;
+    }
+  ) => {
     const res = await apiClient.put(`/orders/${orderId}`, payload);
     return res.data.data;
   },

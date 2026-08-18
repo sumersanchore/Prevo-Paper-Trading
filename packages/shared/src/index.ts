@@ -51,11 +51,17 @@ export interface OptionOrderEntity {
   quantity: number;
   price?: number;
   triggerPrice?: number;
+  targetPrice?: number;
   trailingStopLoss?: number;
   averagePrice?: number;
   status: 'PENDING' | 'EXECUTED' | 'CANCELLED' | 'REJECTED';
   rejectionReason?: string;
   executedAt?: string;
+  tradingSymbol?: string;
+  strikePrice?: number;
+  optionType?: 'CE' | 'PE';
+  symbol?: string;
+  ltp?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -87,9 +93,19 @@ export interface PlaceOrderDto {
   quantity: number;
   price?: number;
   triggerPrice?: number;
+  targetPrice?: number;
   trailingStopLoss?: number;
   clientOrderId?: string;
 }
+
+export interface ModifyOrderDto {
+  price?: number;
+  triggerPrice?: number;
+  targetPrice?: number;
+  trailingStopLoss?: number;
+  quantity?: number;
+}
+
 
 export interface LiveTickData {
   symbol: string;

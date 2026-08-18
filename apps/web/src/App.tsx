@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { Header } from './components/layout/Header.js';
 import { MarketTicker } from './components/layout/MarketTicker.js';
+import { MobileBottomNav } from './components/layout/MobileBottomNav.js';
 import { WalletModal } from './components/layout/WalletModal.js';
 import { AuthModal } from './components/layout/AuthModal.js';
 import { OptionChainTable } from './features/option-chain/OptionChainTable.js';
@@ -28,44 +29,41 @@ export const App: React.FC = () => {
   }, [checkAuth, fetchAllData, initSocketListeners]);
 
   return (
-    <div className="min-h-screen bg-[#0C0D14] text-[#E8EAED] flex flex-col selection:bg-[#00D09C] selection:text-black">
+    <div className="min-h-screen bg-[#0C0D14] text-[#E8EAED] flex flex-col selection:bg-[#00D09C] selection:text-black pb-20 sm:pb-0 overflow-x-hidden">
       {/* Header Navigation */}
       <Header />
 
       {/* Real-time Market Indices Ticker */}
       <MarketTicker />
 
-      {/* Screen Tabs Header (Groww Style) */}
-      <div className="border-b border-groww-border bg-[#0c0d14]">
+      {/* Screen Tabs Header (Groww Style) - Desktop & Tablet */}
+      <div className="border-b border-groww-border bg-[#0c0d14] sticky top-16 z-30">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex gap-8">
+          <div className="flex gap-6 sm:gap-8 overflow-x-auto no-scrollbar">
             <button
               onClick={() => setActiveTab('option-chain')}
-              className={`py-4 text-sm font-bold border-b-2 transition-all ${
-                activeTab === 'option-chain'
-                  ? 'border-[#00D09C] text-white'
-                  : 'border-transparent text-groww-textMuted hover:text-white'
-              }`}
+              className={`py-3 sm:py-4 text-xs sm:text-sm font-bold border-b-2 transition-all shrink-0 cursor-pointer ${activeTab === 'option-chain'
+                ? 'border-[#00D09C] text-white'
+                : 'border-transparent text-groww-textMuted hover:text-white'
+                }`}
             >
               Explore
             </button>
             <button
               onClick={() => setActiveTab('positions')}
-              className={`py-4 text-sm font-bold border-b-2 transition-all ${
-                activeTab === 'positions'
-                  ? 'border-[#00D09C] text-white'
-                  : 'border-transparent text-groww-textMuted hover:text-white'
-              }`}
+              className={`py-3 sm:py-4 text-xs sm:text-sm font-bold border-b-2 transition-all shrink-0 cursor-pointer ${activeTab === 'positions'
+                ? 'border-[#00D09C] text-white'
+                : 'border-transparent text-groww-textMuted hover:text-white'
+                }`}
             >
               Positions
             </button>
             <button
               onClick={() => setActiveTab('orders')}
-              className={`py-4 text-sm font-bold border-b-2 transition-all ${
-                activeTab === 'orders'
-                  ? 'border-[#00D09C] text-white'
-                  : 'border-transparent text-[#8b949e] hover:text-white'
-              }`}
+              className={`py-3 sm:py-4 text-xs sm:text-sm font-bold border-b-2 transition-all shrink-0 cursor-pointer ${activeTab === 'orders'
+                ? 'border-[#00D09C] text-white'
+                : 'border-transparent text-groww-textMuted hover:text-white'
+                }`}
             >
               Orders
             </button>
@@ -80,14 +78,10 @@ export const App: React.FC = () => {
             <div className="flex items-center justify-between">
               <div>
                 <h1 className="text-xl font-black text-white tracking-tight flex items-center gap-2">
-                  <span>NSE F&O Option Chain</span>
-                  <span className="text-xs bg-[#00D09C]/10 text-[#00D09C] border border-[#00D09C]/20 px-2 py-0.5 rounded-full font-bold">
-                    Live LTP / OI Feed
-                  </span>
+                  <span>F&O Option Chain</span>
+
                 </h1>
-                <p className="text-xs text-groww-textSubtle mt-0.5">
-                  Click any Call (CE) or Put (PE) strike to launch the Groww-style order pad and place simulated trades.
-                </p>
+
               </div>
             </div>
             <OptionChainTable />
@@ -98,9 +92,7 @@ export const App: React.FC = () => {
           <div className="space-y-4">
             <div>
               <h1 className="text-xl font-black text-white tracking-tight">Active Portfolio & Positions</h1>
-              <p className="text-xs text-groww-textSubtle mt-0.5">
-                Real-time mark-to-market unrealized P&L, contract metrics, and single-click square-off.
-              </p>
+
             </div>
             {isAuthenticated ? (
               <PositionsList />
@@ -159,6 +151,9 @@ export const App: React.FC = () => {
       <GrowwOrderModal />
       <WalletModal />
       <AuthModal />
+
+      {/* Groww Mobile Bottom Navigation */}
+      <MobileBottomNav activeTab={activeTab} setActiveTab={setActiveTab} />
 
       {/* Enterprise Footer */}
       <footer className="border-t border-groww-border bg-[#090a0f] py-6 mt-12 text-xs text-groww-textSubtle">
