@@ -2,6 +2,7 @@ import type { PoolClient, QueryResult, QueryResultRow } from 'pg';
 export type { PoolClient, QueryResult, QueryResultRow };
 
 export interface DatabaseConfig {
+  connectionString?: string;
   host: string;
   port: number;
   database: string;

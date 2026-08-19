@@ -29,6 +29,15 @@ export function createServer(): Application {
   // Swagger Documentation
   app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
+  // Health check routes
+  app.get(['/api/health', '/health'], (req, res) => {
+    res.json({
+      status: 'healthy',
+      platform: 'PREVO',
+      timestamp: new Date().toISOString(),
+    });
+  });
+
   // Domain API Routes
   app.use(config.apiPrefix, mainRouter);
 

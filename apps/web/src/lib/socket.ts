@@ -4,7 +4,13 @@ let socket: Socket | null = null;
 
 export const getSocket = (): Socket => {
   if (!socket) {
-    socket = io('http://localhost:4000', {
+    const wsUrl =
+      import.meta.env.VITE_WS_URL ||
+      (typeof window !== 'undefined' && import.meta.env.PROD
+        ? window.location.origin
+        : 'http://localhost:4000');
+
+    socket = io(wsUrl, {
       transports: ['websocket', 'polling'],
       autoConnect: true,
       reconnectionAttempts: 10,

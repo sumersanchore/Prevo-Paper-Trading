@@ -11,9 +11,13 @@ dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 dotenv.config();
 
 export const getDatabaseConfig = (): DatabaseConfig => {
-  const isSslEnabled = process.env.DB_SSL === 'true';
+  const connectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+  const isSslEnabled =
+    process.env.DB_SSL === 'true' ||
+    Boolean(connectionString && !connectionString.includes('localhost') && !connectionString.includes('127.0.0.1'));
 
   return {
+    connectionString: connectionString || undefined,
     host: process.env.DB_HOST ?? 'localhost',
     port: parseInt(process.env.DB_PORT ?? '5432', 10),
     database: process.env.DB_NAME ?? 'trademitra_db',

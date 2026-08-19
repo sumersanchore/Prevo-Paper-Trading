@@ -8,4 +8,4 @@ router.get('/', controller.getNotifications);
 router.post('/mark-read', controller.markAsRead);
 router.post('/broadcast', controller.broadcast);
 
-export const notificationsRouter = router;
+export const notificationsRouter: Router = router;

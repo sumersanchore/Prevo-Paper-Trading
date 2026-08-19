@@ -70,8 +70,18 @@ export const setStoredTab = (tab: string): void => {
   }
 };
 
+const getBaseUrl = (): string => {
+  if (import.meta.env.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL;
+  }
+  if (typeof window !== 'undefined' && import.meta.env.PROD) {
+    return '/api/v1';
+  }
+  return 'http://localhost:4000/api/v1';
+};
+
 export const apiClient = axios.create({
-  baseURL: 'http://localhost:4000/api/v1',
+  baseURL: getBaseUrl(),
   headers: {
     'Content-Type': 'application/json',
   },

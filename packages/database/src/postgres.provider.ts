@@ -22,18 +22,28 @@ export class PostgresProvider {
       ...customConfig,
     };
 
-    this.pool = new Pool({
-      host: this.config.host,
-      port: this.config.port,
-      database: this.config.database,
-      user: this.config.user,
-      password: this.config.password,
-      ssl: this.config.ssl,
-      max: this.config.max,
-      idleTimeoutMillis: this.config.idleTimeoutMillis,
-      connectionTimeoutMillis: this.config.connectionTimeoutMillis,
-      maxUses: this.config.maxUses,
-    });
+    this.pool = new Pool(
+      this.config.connectionString
+        ? {
+            connectionString: this.config.connectionString,
+            ssl: this.config.ssl,
+            max: this.config.max,
+            idleTimeoutMillis: this.config.idleTimeoutMillis,
+            connectionTimeoutMillis: this.config.connectionTimeoutMillis,
+          }
+        : {
+            host: this.config.host,
+            port: this.config.port,
+            database: this.config.database,
+            user: this.config.user,
+            password: this.config.password,
+            ssl: this.config.ssl,
+            max: this.config.max,
+            idleTimeoutMillis: this.config.idleTimeoutMillis,
+            connectionTimeoutMillis: this.config.connectionTimeoutMillis,
+            maxUses: this.config.maxUses,
+          }
+    );
 
     this.registerPoolEvents();
     this.registerProcessHooks();
