@@ -12,7 +12,12 @@ export function createServer(): Application {
   const app = express();
 
   // Security & Middleware
-  app.use(helmet({ contentSecurityPolicy: false }));
+  app.use(
+    helmet({
+      contentSecurityPolicy: false,
+      crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
+    })
+  );
   app.use(
     cors({
       origin: '*',
