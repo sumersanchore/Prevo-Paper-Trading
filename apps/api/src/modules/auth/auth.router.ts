@@ -1,11 +1,75 @@
 import { Router } from 'express';
 import { AuthController } from './auth.controller.js';
-import { RegisterSchema, LoginSchema } from './auth.dto.js';
+import {
+  RegisterSchema,
+  LoginSchema,
+  GoogleAuthSchema,
+  SendEmailOtpSchema,
+  VerifyEmailOtpSchema,
+} from './auth.dto.js';
 import { validateBody } from '../../core/middlewares/validate.middleware.js';
 import { authenticateJwt } from '../../core/middlewares/auth.middleware.js';
 
 const router = Router();
 const controller = new AuthController();
+
+/**
+ * @openapi
+ * /auth/email-otp/send:
+ *   post:
+ *     summary: Send 6-digit OTP code to trader email
+ *     tags:
+ *       - Authentication
+ */
+router.post('/email-otp/send', validateBody(SendEmailOtpSchema), (req, res, next) => {
+  controller.sendEmailOtp(req, res).catch(next);
+});
+
+/**
+ * @openapi
+ * /auth/email-otp/verify:
+ *   post:
+ *     summary: Verify 6-digit email OTP and issue JWT session token
+ *     tags:
+ *       - Authentication
+ */
+router.post('/email-otp/verify', validateBody(VerifyEmailOtpSchema), (req, res, next) => {
+  controller.verifyEmailOtp(req, res).catch(next);
+});
+
+/**
+ * @openapi
+ * /auth/google:
+ *   post:
+ *     summary: Authenticate with Google OAuth & issue JWT Bearer token
+ *     tags:
+ *       - Authentication
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - email
+ *               - fullName
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 format: email
+ *               fullName:
+ *                 type: string
+ *               googleId:
+ *                 type: string
+ *               avatarUrl:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Successfully authenticated via Google. Returns JWT token.
+ */
+router.post('/google', validateBody(GoogleAuthSchema), (req, res, next) => {
+  controller.googleLogin(req, res).catch(next);
+});
 
 /**
  * @openapi

@@ -25,6 +25,28 @@ export interface WalletEntity {
   updatedAt: string;
 }
 
+export type WalletTxnType =
+  | 'BUY_DEBIT'
+  | 'SELL_CREDIT'
+  | 'MARGIN_BLOCK'
+  | 'MARGIN_RELEASE'
+  | 'RESET'
+  | 'ADJUSTMENT';
+
+export type WalletTxnDirection = 'DEBIT' | 'CREDIT';
+
+export interface WalletTransactionEntity {
+  id: string;
+  userId: string;
+  orderId?: string;
+  type: WalletTxnType;
+  amount: number;
+  direction: WalletTxnDirection;
+  balanceAfter: number;
+  description: string;
+  createdAt: string;
+}
+
 export interface OptionsContractEntity {
   id: string;
   symbol: string;
@@ -144,4 +166,19 @@ export interface OptionChainStrikeItem {
     volume: number;
     iv?: number;
   };
+}
+
+export type NotificationType = 'ORDER' | 'SYSTEM' | 'PRICE_ALERT' | 'WALLET' | 'ANNOUNCEMENT';
+export type NotificationSeverity = 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR';
+
+export interface NotificationEntity {
+  id: string;
+  userId?: string | null;
+  title: string;
+  message: string;
+  type: NotificationType;
+  severity: NotificationSeverity;
+  isRead: boolean;
+  data?: Record<string, any>;
+  createdAt: string;
 }

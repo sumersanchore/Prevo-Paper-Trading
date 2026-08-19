@@ -36,31 +36,69 @@ export class ContractsService {
     chain: OptionChainStrikeItem[];
   }> {
     const sym = symbol.toUpperCase().replace(/\s+/g, '');
-    const isBankNifty = sym === 'BANKNIFTY';
-    const isSensex = sym === 'SENSEX';
-    const indexName = isBankNifty ? 'BANK NIFTY' : isSensex ? 'SENSEX' : 'NIFTY 50';
-    const indexData = this.feedProvider.getIndices().find((i) => i.symbol === indexName);
-    const spotPrice = indexData
-      ? indexData.ltp
-      : isBankNifty
-      ? 57262.40
-      : isSensex
-      ? 77235.46
-      : 24154.90;
-    const change = indexData
-      ? indexData.change
-      : isBankNifty
-      ? -235.40
-      : isSensex
-      ? -492.70
-      : -132.75;
-    const pChange = indexData
-      ? indexData.pChange
-      : isBankNifty
-      ? -0.41
-      : isSensex
-      ? -0.63
-      : -0.55;
+    let indexName = 'NIFTY 50';
+    let defaultSpot = 24154.90;
+    let defaultChange = -132.75;
+    let defaultPChange = -0.55;
+    let step = 50;
+
+    if (sym === 'BANKNIFTY') {
+      indexName = 'BANK NIFTY';
+      defaultSpot = 57262.40;
+      defaultChange = -235.40;
+      defaultPChange = -0.41;
+      step = 100;
+    } else if (sym === 'SENSEX') {
+      indexName = 'SENSEX';
+      defaultSpot = 77235.46;
+      defaultChange = -492.70;
+      defaultPChange = -0.63;
+      step = 100;
+    } else if (sym === 'FINNIFTY') {
+      indexName = 'FIN NIFTY';
+      defaultSpot = 23890.00;
+      defaultChange = -110.00;
+      defaultPChange = -0.46;
+      step = 50;
+    } else if (sym === 'MIDCPNIFTY') {
+      indexName = 'MIDCAP NIFTY';
+      defaultSpot = 12450.00;
+      defaultChange = 45.00;
+      defaultPChange = 0.36;
+      step = 25;
+    } else if (sym === 'BANKEX') {
+      indexName = 'BANKEX';
+      defaultSpot = 62340.00;
+      defaultChange = -190.00;
+      defaultPChange = -0.30;
+      step = 100;
+    } else if (sym === 'BOSCH') {
+      indexName = 'BOSCH';
+      defaultSpot = 48730.00;
+      defaultChange = 1760.00;
+      defaultPChange = 3.75;
+      step = 250;
+    } else if (sym === 'TUBEINVEST') {
+      indexName = 'TUBEINVEST';
+      defaultSpot = 2959.00;
+      defaultChange = 217.60;
+      defaultPChange = 7.94;
+      step = 20;
+    } else if (sym === 'HDFCBANK') {
+      indexName = 'HDFCBANK';
+      defaultSpot = 723.00;
+      defaultChange = -6.00;
+      defaultPChange = -0.82;
+      step = 10;
+    }
+
+    const indexData = this.feedProvider.getIndices().find((i) => 
+      i.symbol.toUpperCase().replace(/\s+/g, '') === sym ||
+      i.symbol.toUpperCase() === indexName.toUpperCase()
+    );
+    const spotPrice = indexData ? indexData.ltp : defaultSpot;
+    const change = indexData ? indexData.change : defaultChange;
+    const pChange = indexData ? indexData.pChange : defaultPChange;
 
     // 1. Dynamically compute all active weekly & monthly expiries from live calendar
     const dynamicExpiries = getDynamicExpiries(symbol, 8);
@@ -68,9 +106,9 @@ export class ContractsService {
     const selectedExpiry = expiry && expiries.includes(expiry) ? expiry : expiries[0]!;
     const activeExpiryObj = dynamicExpiries.find((e) => e.date === selectedExpiry) || dynamicExpiries[0]!;
 
-    // 2. Dynamically compute strike ladder centered around live spot price (Step: 50 for NIFTY, 100 for BANKNIFTY)
-    const step = isBankNifty ? 100 : 50;
-    const strikes = getDynamicStrikes(spotPrice, step, 17);
+    // 2. Dynamically compute strike ladder centered around live spot price (7 above ATM, 1 ATM, 7 below ATM)
+    const strikes = getDynamicStrikes(spotPrice, step, 15);
+    const prevSpot = spotPrice - change;
 
     // 3. Generate Option Chain strikes dynamically with precise intrinsic & time-decay values
     const chain: OptionChainStrikeItem[] = [];
@@ -85,27 +123,42 @@ export class ContractsService {
       const cePricing = calculateOptionPricing(spotPrice, strike, 'CE', activeExpiryObj.daysToExpiry);
       const pePricing = calculateOptionPricing(spotPrice, strike, 'PE', activeExpiryObj.daysToExpiry);
 
+      const prevCePricing = calculateOptionPricing(prevSpot, strike, 'CE', activeExpiryObj.daysToExpiry);
+      const prevPePricing = calculateOptionPricing(prevSpot, strike, 'PE', activeExpiryObj.daysToExpiry);
+
       const ceLtp = liveCe?.ltp ?? cePricing.ltp;
       const peLtp = livePe?.ltp ?? pePricing.ltp;
+
+      const ceClose = prevCePricing.ltp;
+      const peClose = prevPePricing.ltp;
+
+      const computedCeChange = Number((ceLtp - ceClose).toFixed(2));
+      const computedCePChange = ceClose > 0 ? Number(((computedCeChange / ceClose) * 100).toFixed(2)) : 0;
+
+      const computedPeChange = Number((peLtp - peClose).toFixed(2));
+      const computedPePChange = peClose > 0 ? Number(((computedPeChange / peClose) * 100).toFixed(2)) : 0;
+
+      const ceContract = await this.repository.getContractById(ceSymbol);
+      const peContract = await this.repository.getContractById(peSymbol);
 
       chain.push({
         strikePrice: strike,
         ce: {
-          contractId: `dyn_${ceSymbol}`,
+          contractId: ceContract ? ceContract.id : ceSymbol,
           tradingSymbol: ceSymbol,
           ltp: ceLtp,
-          change: liveCe?.change ?? Number((ceLtp * 0.015).toFixed(2)),
-          pChange: liveCe?.pChange ?? 1.25,
+          change: liveCe?.change ?? computedCeChange,
+          pChange: liveCe?.pChange ?? computedCePChange,
           oi: liveCe?.oi ?? cePricing.oi,
           volume: liveCe?.volume ?? cePricing.volume,
           iv: cePricing.iv,
         },
         pe: {
-          contractId: `dyn_${peSymbol}`,
+          contractId: peContract ? peContract.id : peSymbol,
           tradingSymbol: peSymbol,
           ltp: peLtp,
-          change: livePe?.change ?? Number((-peLtp * 0.012).toFixed(2)),
-          pChange: livePe?.pChange ?? -1.10,
+          change: livePe?.change ?? computedPeChange,
+          pChange: livePe?.pChange ?? computedPePChange,
           oi: livePe?.oi ?? pePricing.oi,
           volume: livePe?.volume ?? pePricing.volume,
           iv: pePricing.iv,

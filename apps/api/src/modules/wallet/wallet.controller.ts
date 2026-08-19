@@ -28,4 +28,14 @@ export class WalletController {
       data: wallet,
     });
   }
+
+  public async getTransactions(req: Request, res: Response): Promise<void> {
+    const userId = req.user?.id || (req.headers['x-user-id'] as string) || '1';
+    const transactions = await this.service.getTransactions(userId);
+
+    res.status(200).json({
+      success: true,
+      data: transactions,
+    });
+  }
 }

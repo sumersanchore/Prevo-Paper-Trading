@@ -4,6 +4,7 @@ import { OrdersRepository } from './orders.repository.js';
 import { WalletRepository } from '../wallet/wallet.repository.js';
 import { ContractsRepository } from '../contracts/contracts.repository.js';
 import { PositionsRepository } from '../positions/positions.repository.js';
+import { NotificationsService } from '../notifications/notifications.service.js';
 import { McpFeedProvider } from '../../providers/mcp.provider.js';
 import { logger } from '../../core/logger.js';
 import {
@@ -13,11 +14,15 @@ import {
   ValidationError,
 } from '../../core/errors.js';
 
+// Standard Indian F&O Option Selling SPAN Margin per lot (~₹1,15,000 / lot)
+export const OPTION_SELLING_MARGIN_PER_LOT = 115000;
+
 export class OrdersService {
   private readonly ordersRepo: OrdersRepository;
   private readonly walletRepo: WalletRepository;
   private readonly contractsRepo: ContractsRepository;
   private readonly positionsRepo: PositionsRepository;
+  private readonly notificationsService: NotificationsService;
   private readonly feedProvider: McpFeedProvider;
 
   constructor(
@@ -25,13 +30,38 @@ export class OrdersService {
     walletRepo = new WalletRepository(),
     contractsRepo = new ContractsRepository(),
     positionsRepo = new PositionsRepository(),
+    notificationsService = new NotificationsService(),
     feedProvider = McpFeedProvider.getInstance()
   ) {
     this.ordersRepo = ordersRepo;
     this.walletRepo = walletRepo;
     this.contractsRepo = contractsRepo;
     this.positionsRepo = positionsRepo;
+    this.notificationsService = notificationsService;
     this.feedProvider = feedProvider;
+
+    // Periodic heartbeat to evaluate all open Stop Loss & Target orders every second
+    setInterval(() => {
+      this.evaluateAllPendingOrders().catch(() => {});
+    }, 1000);
+  }
+
+  public async evaluateAllPendingOrders(): Promise<void> {
+    try {
+      const pendingOrders = await this.ordersRepo.getAllPendingOrders();
+      if (!pendingOrders || pendingOrders.length === 0) return;
+
+      for (const order of pendingOrders) {
+        const contract = await this.contractsRepo.getContractById(order.contractId);
+        if (!contract) continue;
+        const tick = this.feedProvider.getLatestTick(contract.tradingSymbol);
+        if (tick) {
+          await this.processTickForOrders(tick);
+        }
+      }
+    } catch (err: any) {
+      logger.debug(`[OrdersEngine] evaluateAllPendingOrders: ${err?.message}`);
+    }
   }
 
   public async placeOrder(userId: string, dto: PlaceOrderDto): Promise<OptionOrderEntity> {
@@ -64,8 +94,6 @@ export class OrdersService {
       }
     }
     
-    // Standard Indian F&O Option Selling SPAN Margin per lot (~₹1,15,000 / lot)
-    const OPTION_SELLING_MARGIN_PER_LOT = 115000;
     const lotSize = contract.lotSize || 25;
     const lots = Math.max(1, Math.round(dto.quantity / lotSize));
     const premiumTurnover = Number((dto.quantity * executionPrice).toFixed(2));
@@ -98,16 +126,87 @@ export class OrdersService {
           ? (isClosingShort ? 0 : premiumTurnover)
           : (isClosingLong ? 0 : Number((lots * OPTION_SELLING_MARGIN_PER_LOT).toFixed(2)));
 
+      // ── Step 1: Margin & Amount Security Check ──────────────────────────────
       if (requiredMargin > 0 && wallet.availableMargin < requiredMargin) {
-        throw new InsufficientFundsError(
-          `Insufficient margin. Required: ₹${requiredMargin.toLocaleString('en-IN')}, Available: ₹${wallet.availableMargin.toLocaleString('en-IN')}`
-        );
+        const shortfall = Number((requiredMargin - wallet.availableMargin).toFixed(2));
+        const rejectReason = `Insufficient Available Margin: ₹${shortfall.toLocaleString('en-IN')} more needed (Required: ₹${requiredMargin.toLocaleString('en-IN')}, Available: ₹${wallet.availableMargin.toLocaleString('en-IN')}, Shortfall: ₹${shortfall.toLocaleString('en-IN')})`;
+        
+        // Persist the rejected order record in database with explicit reason
+        const rejectedOrder = await this.ordersRepo.createOrder(client, {
+          clientOrderId: dto.clientOrderId,
+          userId,
+          contractId: contract.id,
+          orderType: dto.orderType,
+          transactionType: dto.transactionType,
+          productType: dto.productType,
+          quantity: dto.quantity,
+          price: dto.price,
+          triggerPrice: dto.triggerPrice,
+          targetPrice: dto.targetPrice,
+          trailingStopLoss: dto.trailingStopLoss,
+          status: 'REJECTED',
+          rejectionReason: rejectReason,
+          tradingSymbol: contract.tradingSymbol,
+          symbol: contract.symbol,
+          strikePrice: contract.strikePrice,
+          optionType: contract.optionType,
+        });
+
+        const optTypeStr = contract.optionType === 'CE' ? 'Call' : 'Put';
+        const friendlyName = `${contract.symbol} ${contract.strikePrice} ${optTypeStr}`.trim();
+        await this.notificationsService.notifyUser({
+          userId,
+          title: 'Order Rejected',
+          message: `${friendlyName} order rejected: Shortfall of ₹${shortfall.toLocaleString('en-IN')} (Required: ₹${requiredMargin.toLocaleString('en-IN')}, Available: ₹${wallet.availableMargin.toLocaleString('en-IN')})`,
+          type: 'ORDER',
+          severity: 'ERROR',
+          data: {
+            orderId: rejectedOrder.id,
+            status: 'REJECTED',
+            rejectionReason: rejectReason,
+            shortfall,
+            requiredMargin,
+            availableMargin: wallet.availableMargin,
+          },
+        });
+
+        this.feedProvider.emit('order:update', { userId, orderId: rejectedOrder.id });
+
+        throw new InsufficientFundsError(rejectReason);
       }
 
-      const isMarket = dto.orderType === 'MARKET';
-      const orderStatus = isMarket ? 'EXECUTED' : 'PENDING';
-      const executedAt = isMarket ? new Date().toISOString() : undefined;
-      const avgPrice = isMarket ? executionPrice : undefined;
+      // ── Step 2: Live Price & Trigger Match Verification ─────────────────────
+      let isExecutableNow = false;
+      let matchedExecutionPrice = executionPrice;
+
+      if (dto.orderType === 'MARKET') {
+        isExecutableNow = true;
+        matchedExecutionPrice = ltp;
+      } else if (dto.orderType === 'LIMIT' && dto.price) {
+        // BUY LIMIT: Matches if live LTP <= Limit Price (fills at current best market LTP)
+        // SELL LIMIT: Matches if live LTP >= Limit Price (fills at current best market LTP)
+        if (dto.transactionType === 'BUY' && ltp <= dto.price) {
+          isExecutableNow = true;
+          matchedExecutionPrice = ltp;
+        } else if (dto.transactionType === 'SELL' && ltp >= dto.price) {
+          isExecutableNow = true;
+          matchedExecutionPrice = ltp;
+        }
+      } else if ((dto.orderType === 'SL' || dto.orderType === 'SL-M') && dto.triggerPrice) {
+        // BUY SL: Triggers if live LTP >= Trigger Price
+        // SELL SL: Triggers if live LTP <= Trigger Price
+        if (dto.transactionType === 'BUY' && ltp >= dto.triggerPrice) {
+          isExecutableNow = true;
+          matchedExecutionPrice = dto.orderType === 'SL-M' ? ltp : (dto.price ?? ltp);
+        } else if (dto.transactionType === 'SELL' && ltp <= dto.triggerPrice) {
+          isExecutableNow = true;
+          matchedExecutionPrice = dto.orderType === 'SL-M' ? ltp : (dto.price ?? ltp);
+        }
+      }
+
+      const orderStatus = isExecutableNow ? 'EXECUTED' : 'PENDING';
+      const executedAt = isExecutableNow ? new Date().toISOString() : undefined;
+      const avgPrice = isExecutableNow ? matchedExecutionPrice : undefined;
 
       // Create Order
       const order = await this.ordersRepo.createOrder(client, {
@@ -125,67 +224,170 @@ export class OrdersService {
         averagePrice: avgPrice,
         status: orderStatus,
         executedAt,
+        tradingSymbol: contract.tradingSymbol,
+        symbol: contract.symbol,
+        strikePrice: contract.strikePrice,
+        optionType: contract.optionType,
       });
 
-      if (isMarket) {
-        // Update Wallet Margin
+      // Notification ONLY for successfully executed trades (Buy or Sell)
+      if (isExecutableNow) {
+        const optTypeStr = contract.optionType === 'CE' ? 'Call' : 'Put';
+        let expStr = '';
+        try {
+          const d = new Date(contract.expiryDate);
+          const day = d.getDate();
+          const monNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+          const mon = monNames[d.getMonth()] || '';
+          expStr = `${day} ${mon}`;
+        } catch {
+          expStr = '';
+        }
+        const friendlyName = `${contract.symbol} ${expStr} ${contract.strikePrice} ${optTypeStr}`.trim();
+        const productStr = dto.productType === 'MIS' ? 'intraday' : 'delivery';
+
+        await this.notificationsService.notifyUser({
+          userId,
+          title: 'Executed',
+          message: `${friendlyName} , ${productStr} ${dto.transactionType.toLowerCase()} order for ${dto.quantity} qty executed at ₹${matchedExecutionPrice.toFixed(2)}`,
+          type: 'ORDER',
+          severity: 'SUCCESS',
+          data: {
+            orderId: order.id,
+            contractId: contract.id,
+            tradingSymbol: contract.tradingSymbol,
+            symbol: contract.symbol,
+            strikePrice: Number(contract.strikePrice),
+            optionType: contract.optionType,
+            lotSize: contract.lotSize || 25,
+            ltp: matchedExecutionPrice,
+            price: matchedExecutionPrice,
+            quantity: dto.quantity,
+            orderType: dto.orderType,
+            productType: dto.productType,
+            transactionType: dto.transactionType,
+            status: 'EXECUTED',
+          },
+        });
+      }
+
+      if (isExecutableNow) {
+        // ── Wallet Update ──────────────────────────────────────────────────
+        const actualTradePrice = matchedExecutionPrice;
+        const actualTradePremium = Number((dto.quantity * actualTradePrice).toFixed(2));
+
+        let newCashBalance = wallet.cashBalance;
         let newUtilized = wallet.utilizedMargin;
+        let txnType: import('@trademitra/shared').WalletTxnType = 'ADJUSTMENT';
+        let txnDirection: import('@trademitra/shared').WalletTxnDirection = 'DEBIT';
+        let txnAmount = 0;
+        let txnDesc = '';
+
         if (dto.transactionType === 'BUY') {
           if (isClosingShort) {
-            const closingLots = Math.ceil(Math.min(dto.quantity, Math.abs(existingPos.netQuantity)) / lotSize);
-            newUtilized = Math.max(0, wallet.utilizedMargin - (closingLots * OPTION_SELLING_MARGIN_PER_LOT));
+            // Buying back short: release SPAN margin, adjust cash with realized PnL
+            const closingQty = Math.min(dto.quantity, Math.abs(existingPos?.netQuantity ?? 0));
+            const closingLots = Math.ceil(closingQty / lotSize);
+            const spanRelease = closingLots * OPTION_SELLING_MARGIN_PER_LOT;
+            const avgSell = existingPos?.averageSellPrice ?? 0;
+            const realizedPnl = Number((closingQty * (avgSell - actualTradePrice)).toFixed(2));
+            newUtilized = Math.max(0, wallet.utilizedMargin - spanRelease);
+            newCashBalance = wallet.cashBalance + realizedPnl;
+            txnType = realizedPnl >= 0 ? 'SELL_CREDIT' : 'BUY_DEBIT';
+            txnDirection = realizedPnl >= 0 ? 'CREDIT' : 'DEBIT';
+            txnAmount = Math.abs(realizedPnl);
+            txnDesc = `Buy-back ${closingQty} qty @ ₹${actualTradePrice.toFixed(2)} (short cover, P&L: ₹${realizedPnl.toFixed(2)}, SPAN ₹${spanRelease.toLocaleString('en-IN')} released)`;
           } else {
-            newUtilized = wallet.utilizedMargin + requiredMargin;
+            // Fresh long: block premium in utilizedMargin (do not double-deduct from cashBalance)
+            newCashBalance = wallet.cashBalance;
+            newUtilized = wallet.utilizedMargin + actualTradePremium;
+            txnType = 'BUY_DEBIT';
+            txnDirection = 'DEBIT';
+            txnAmount = actualTradePremium;
+            txnDesc = `BUY ${dto.quantity} qty @ ₹${actualTradePrice.toFixed(2)} (premium blocked: ₹${actualTradePremium.toLocaleString('en-IN')})`;
           }
         } else {
           // SELL transaction
           if (isClosingLong) {
-            const closingBuyAmt = Math.min(dto.quantity, existingPos.netQuantity) * existingPos.averageBuyPrice;
-            newUtilized = Math.max(0, wallet.utilizedMargin - closingBuyAmt);
+            // Selling long position: release utilized margin, adjust cash with realized PnL
+            const closingQty = Math.min(dto.quantity, existingPos?.netQuantity ?? 0);
+            const avgBuy = existingPos?.averageBuyPrice ?? 0;
+            const closingBuyMargin = Number((closingQty * avgBuy).toFixed(2));
+            const saleProceeds = Number((closingQty * actualTradePrice).toFixed(2));
+            const realizedPnl = Number((saleProceeds - closingBuyMargin).toFixed(2));
+            newUtilized = Math.max(0, wallet.utilizedMargin - closingBuyMargin);
+            newCashBalance = wallet.cashBalance + realizedPnl;
+            txnType = realizedPnl >= 0 ? 'SELL_CREDIT' : 'BUY_DEBIT';
+            txnDirection = realizedPnl >= 0 ? 'CREDIT' : 'DEBIT';
+            txnAmount = Math.abs(realizedPnl);
+            txnDesc = `SELL ${closingQty} qty @ ₹${actualTradePrice.toFixed(2)} (long exit, P&L: ₹${realizedPnl.toFixed(2)}, margin ₹${closingBuyMargin.toLocaleString('en-IN')} released)`;
           } else {
+            // Fresh short: block SPAN margin
+            newCashBalance = wallet.cashBalance;
             newUtilized = wallet.utilizedMargin + requiredMargin;
+            txnType = 'MARGIN_BLOCK';
+            txnDirection = 'DEBIT';
+            txnAmount = requiredMargin;
+            txnDesc = `SELL ${dto.quantity} qty @ ₹${actualTradePrice.toFixed(2)} (SPAN margin blocked for short)`;
           }
         }
 
-        await this.walletRepo.updateWalletBalances(
+        const finalCash = Math.max(0, Number(newCashBalance.toFixed(2)));
+        const finalUtilized = Math.max(0, Number(newUtilized.toFixed(2)));
+        const newAvailable = Math.max(0, finalCash + wallet.pledgeMargin - finalUtilized);
+
+        await this.walletRepo.updateWalletBalances(client, userId, finalCash, finalUtilized);
+
+        // Record transaction in the ledger
+        await this.walletRepo.recordTransaction(
           client,
           userId,
-          wallet.cashBalance,
-          newUtilized
+          txnType,
+          txnDirection,
+          txnAmount,
+          newAvailable,
+          txnDesc,
+          order.id
         );
 
-        // Update / Upsert Position
-        let netQty = existingPos?.netQuantity ?? 0;
-        let buyQty = existingPos?.buyQuantity ?? 0;
-        let sellQty = existingPos?.sellQuantity ?? 0;
-        let buyAmt = existingPos?.buyAmount ?? 0;
-        let sellAmt = existingPos?.sellAmount ?? 0;
-        let realizedPnl = existingPos?.realizedPnl ?? 0;
-        let avgBuy = existingPos?.averageBuyPrice ?? 0;
-        let avgSell = existingPos?.averageSellPrice ?? 0;
+        // ── Position Update ────────────────────────────────────────────────
+        const isFreshPosition = !existingPos || existingPos.status === 'CLOSED' || existingPos.netQuantity === 0;
+        let netQty = isFreshPosition ? 0 : (existingPos.netQuantity ?? 0);
+        let buyQty = isFreshPosition ? 0 : (existingPos.buyQuantity ?? 0);
+        let sellQty = isFreshPosition ? 0 : (existingPos.sellQuantity ?? 0);
+        let buyAmt = isFreshPosition ? 0 : (existingPos.buyAmount ?? 0);
+        let sellAmt = isFreshPosition ? 0 : (existingPos.sellAmount ?? 0);
+        let realizedPnl = isFreshPosition ? 0 : (existingPos.realizedPnl ?? 0);
+        let avgBuy = isFreshPosition ? 0 : (existingPos.averageBuyPrice ?? 0);
+        let avgSell = isFreshPosition ? 0 : (existingPos.averageSellPrice ?? 0);
+
+        const thisPremium = Number((dto.quantity * actualTradePrice).toFixed(2));
 
         if (dto.transactionType === 'BUY') {
-          // If we had short position, calculate realized PnL on buy back
           if (netQty < 0) {
+            // Closing a short position
             const closingQty = Math.min(dto.quantity, Math.abs(netQty));
-            const pnl = closingQty * (avgSell - executionPrice);
+            const pnl = closingQty * (avgSell - actualTradePrice);
             realizedPnl += pnl;
+            avgBuy = actualTradePrice;
           }
           netQty += dto.quantity;
           buyQty += dto.quantity;
-          buyAmt += requiredMargin;
-          avgBuy = buyQty > 0 ? Number((buyAmt / buyQty).toFixed(2)) : 0;
+          buyAmt += thisPremium;
+          avgBuy = buyQty > 0 ? Number((buyAmt / buyQty).toFixed(2)) : actualTradePrice;
         } else {
           // SELL transaction
           if (netQty > 0) {
+            // Closing a long position
             const closingQty = Math.min(dto.quantity, netQty);
-            const pnl = closingQty * (executionPrice - avgBuy);
+            const pnl = closingQty * (actualTradePrice - avgBuy);
             realizedPnl += pnl;
+            avgSell = actualTradePrice; // Exact executed sell price
           }
           netQty -= dto.quantity;
           sellQty += dto.quantity;
-          sellAmt += requiredMargin;
-          avgSell = sellQty > 0 ? Number((sellAmt / sellQty).toFixed(2)) : 0;
+          sellAmt += thisPremium;
+          avgSell = (netQty === 0) ? actualTradePrice : (sellQty > 0 ? Number((sellAmt / sellQty).toFixed(2)) : actualTradePrice);
         }
 
         await this.positionsRepo.upsertPosition(client, {
@@ -242,20 +444,46 @@ export class OrdersService {
             targetPrice: exitTarget,
             trailingStopLoss: exitTrail,
             status: 'PENDING',
+            tradingSymbol: contract.tradingSymbol,
+            symbol: contract.symbol,
+            strikePrice: contract.strikePrice,
+            optionType: contract.optionType,
           });
+        }
+      } else {
+        // For PENDING orders (LIMIT, SL, SL-M): Lock margin immediately so money cannot be double-spent
+        if (requiredMargin > 0) {
+          const pendingUtilized = Number((wallet.utilizedMargin + requiredMargin).toFixed(2));
+          await this.walletRepo.updateWalletBalances(client, userId, wallet.cashBalance, pendingUtilized);
+          await this.walletRepo.recordTransaction(
+            client,
+            userId,
+            'MARGIN_BLOCK',
+            'DEBIT',
+            requiredMargin,
+            Math.max(0, wallet.cashBalance + wallet.pledgeMargin - pendingUtilized),
+            `Margin locked for PENDING ${dto.orderType} ${dto.transactionType} #${order.id}`,
+            order.id
+          );
         }
       }
 
       return order;
     };
 
+    let createdOrder: OptionOrderEntity;
     try {
-      return await db.withTransaction((ctx) => executeOrderInTx(ctx.client));
+      createdOrder = await db.withTransaction((ctx) => executeOrderInTx(ctx.client));
     } catch (err: any) {
       if (err instanceof AppError) throw err;
       // Fallback execute
-      return executeOrderInTx(null);
+      createdOrder = await executeOrderInTx(null);
     }
+
+    // Broadcast new order update event immediately to client
+    this.feedProvider.emit('order:update', { userId, orderId: createdOrder.id });
+
+    return createdOrder;
   }
 
   public async getUserOrders(userId: string, status?: string): Promise<OptionOrderEntity[]> {
@@ -266,17 +494,16 @@ export class OrdersService {
       orders.map(async (order) => {
         try {
           const contract = await this.contractsRepo.getContractById(order.contractId);
-          if (contract) {
-            const tick = this.feedProvider.getLatestTick(contract.tradingSymbol);
-            return {
-              ...order,
-              tradingSymbol: contract.tradingSymbol,
-              strikePrice: contract.strikePrice,
-              optionType: contract.optionType,
-              symbol: contract.symbol,
-              ltp: tick?.ltp ?? contract.strikePrice,
-            };
-          }
+          const tradingSym = contract?.tradingSymbol || order.tradingSymbol;
+          const tick = tradingSym ? this.feedProvider.getLatestTick(tradingSym) : null;
+          return {
+            ...order,
+            tradingSymbol: tradingSym || order.tradingSymbol,
+            strikePrice: contract?.strikePrice ?? order.strikePrice,
+            optionType: contract?.optionType ?? order.optionType,
+            symbol: contract?.symbol ?? order.symbol,
+            ltp: tick?.ltp ?? order.ltp ?? contract?.strikePrice,
+          };
         } catch {
           // Keep raw order if lookup fails
         }
@@ -304,18 +531,46 @@ export class OrdersService {
       throw new ValidationError('Only PENDING orders can be modified.');
     }
 
-    const orderExecPrice = dto.price ?? existing.price ?? existing.averagePrice ?? 0;
-    const isBuy = existing.transactionType === 'BUY';
+    const contract = await this.contractsRepo.getContractById(existing.contractId);
+    const tick = contract ? this.feedProvider.getLatestTick(contract.tradingSymbol) : null;
+    const liveLtp = tick?.ltp ?? (existing.price || existing.averagePrice || 100);
+    const existingPos = await this.positionsRepo.getPosition(userId, existing.contractId, existing.productType);
 
-    if (isBuy && orderExecPrice > 0) {
-      if (dto.triggerPrice !== undefined && dto.triggerPrice > 0 && dto.triggerPrice >= orderExecPrice) {
+    const isLongTrade = existingPos
+      ? (existingPos.netQuantity > 0 || (existingPos.netQuantity === 0 && existing.transactionType === 'BUY'))
+      : (existing.transactionType === 'BUY' || (existing.triggerPrice !== undefined && existing.triggerPrice < liveLtp));
+
+    if (isLongTrade) {
+      if (dto.triggerPrice !== undefined && dto.triggerPrice > 0 && dto.triggerPrice >= liveLtp) {
         throw new ValidationError(
-          `Stop Loss price (₹${dto.triggerPrice.toFixed(2)}) cannot be greater than or equal to Buy price (₹${orderExecPrice.toFixed(2)}). Stop loss must be below your buy amount.`
+          `Stop Loss price (₹${dto.triggerPrice.toFixed(2)}) must be strictly less than live LTP (₹${liveLtp.toFixed(2)}).`
         );
       }
-      if (dto.targetPrice !== undefined && dto.targetPrice > 0 && dto.targetPrice <= orderExecPrice) {
+      if (dto.targetPrice !== undefined && dto.targetPrice > 0 && dto.targetPrice <= liveLtp) {
         throw new ValidationError(
-          `Target price (₹${dto.targetPrice.toFixed(2)}) must be greater than Buy price (₹${orderExecPrice.toFixed(2)}).`
+          `Target price (₹${dto.targetPrice.toFixed(2)}) must be strictly greater than live LTP (₹${liveLtp.toFixed(2)}).`
+        );
+      }
+      if (dto.triggerPrice !== undefined && dto.targetPrice !== undefined && dto.triggerPrice > 0 && dto.targetPrice > 0 && dto.triggerPrice >= dto.targetPrice) {
+        throw new ValidationError(
+          `Stop Loss price (₹${dto.triggerPrice.toFixed(2)}) must be strictly less than Target price (₹${dto.targetPrice.toFixed(2)}).`
+        );
+      }
+    } else {
+      // Short trade
+      if (dto.triggerPrice !== undefined && dto.triggerPrice > 0 && dto.triggerPrice <= liveLtp) {
+        throw new ValidationError(
+          `Stop Loss price (₹${dto.triggerPrice.toFixed(2)}) must be strictly greater than live LTP (₹${liveLtp.toFixed(2)}).`
+        );
+      }
+      if (dto.targetPrice !== undefined && dto.targetPrice > 0 && dto.targetPrice >= liveLtp) {
+        throw new ValidationError(
+          `Target price (₹${dto.targetPrice.toFixed(2)}) must be strictly less than live LTP (₹${liveLtp.toFixed(2)}).`
+        );
+      }
+      if (dto.triggerPrice !== undefined && dto.targetPrice !== undefined && dto.triggerPrice > 0 && dto.targetPrice > 0 && dto.triggerPrice <= dto.targetPrice) {
+        throw new ValidationError(
+          `Stop Loss price (₹${dto.triggerPrice.toFixed(2)}) must be strictly greater than Target price (₹${dto.targetPrice.toFixed(2)}).`
         );
       }
     }
@@ -329,10 +584,22 @@ export class OrdersService {
     });
 
     if (!updated) throw new NotFoundError('Failed to modify order.');
-    return updated;
+
+    // Broadcast modified order update to frontend immediately
+    this.feedProvider.emit('order:update', { userId: updated.userId, orderId: updated.id });
+
+    // Check if the modified order should trigger immediately against the latest market price
+    if (contract) {
+      const latestTick = this.feedProvider.getLatestTick(contract.tradingSymbol);
+      if (latestTick) {
+        await this.processTickForOrders(latestTick);
+      }
+    }
+
+    return (await this.ordersRepo.getOrderById(orderId)) || updated;
   }
 
-  public async cancelOrder(userId: string, orderId: string): Promise<OptionOrderEntity> {
+  public async cancelOrder(userId: string, orderId: string, reason = 'Cancelled by Trader'): Promise<OptionOrderEntity> {
     const existing = await this.ordersRepo.getOrderById(orderId);
     if (!existing || existing.userId !== userId) {
       throw new NotFoundError('Order not found.');
@@ -343,14 +610,58 @@ export class OrdersService {
 
     const updated = await this.ordersRepo.updateOrder(null, orderId, {
       status: 'CANCELLED',
+      rejectionReason: reason,
     });
 
     if (!updated) throw new NotFoundError('Failed to cancel order.');
+
+    // Release locked margin if this was a fresh opening pending order
+    try {
+      const contract = await this.contractsRepo.getContractById(existing.contractId);
+      const existingPos = await this.positionsRepo.getPosition(userId, existing.contractId, existing.productType);
+      const isClosing = (existing.transactionType === 'SELL' && (existingPos?.netQuantity ?? 0) > 0) ||
+                        (existing.transactionType === 'BUY' && (existingPos?.netQuantity ?? 0) < 0);
+      if (!isClosing) {
+        const lotSize = contract?.lotSize || 25;
+        const lots = Math.max(1, Math.round(existing.quantity / lotSize));
+        const marginToRelease = existing.transactionType === 'BUY'
+          ? Number((existing.quantity * (existing.price || existing.triggerPrice || 0)).toFixed(2))
+          : Number((lots * OPTION_SELLING_MARGIN_PER_LOT).toFixed(2));
+        if (marginToRelease > 0) {
+          const wallet = await this.walletRepo.getWalletByUserId(userId);
+          const newUtilized = Math.max(0, Number((wallet.utilizedMargin - marginToRelease).toFixed(2)));
+          await this.walletRepo.updateWalletBalances(null, userId, wallet.cashBalance, newUtilized);
+          await this.walletRepo.recordTransaction(
+            null,
+            userId,
+            'MARGIN_RELEASE',
+            'CREDIT',
+            marginToRelease,
+            Math.max(0, wallet.cashBalance + wallet.pledgeMargin - newUtilized),
+            `Margin released on cancellation of order #${existing.id}`,
+            existing.id
+          );
+        }
+      }
+    } catch (err) {
+      logger.error(`Failed to release margin for cancelled order #${orderId}:`, err);
+    }
+
     return updated;
   }
 
   public async cancelAllOrders(userId: string): Promise<OptionOrderEntity[]> {
-    return this.ordersRepo.cancelAllPendingOrders(null, userId);
+    const pendingOrders = await this.ordersRepo.getOrdersByUserId(userId, 'PENDING');
+    const cancelledOrders: OptionOrderEntity[] = [];
+    for (const ord of pendingOrders) {
+      try {
+        const c = await this.cancelOrder(userId, ord.id, 'Bulk cancelled by Trader');
+        cancelledOrders.push(c);
+      } catch {
+        // Continue cancelling others
+      }
+    }
+    return cancelledOrders;
   }
 
   /**
@@ -370,17 +681,25 @@ export class OrdersService {
       if (pendingOrders.length === 0) return;
 
       for (const order of pendingOrders) {
+        if (order.status !== 'PENDING') continue;
+
         const contract = await this.contractsRepo.getContractById(order.contractId);
-        if (!contract || contract.tradingSymbol !== tick.tradingSymbol) continue;
+        if (!contract) continue;
+
+        const symbolMatches =
+          contract.tradingSymbol === tick.tradingSymbol ||
+          contract.id === (tick as any).contractId ||
+          contract.tradingSymbol?.replace(/[\s_]+/g, '').toUpperCase() === tick.tradingSymbol?.replace(/[\s_]+/g, '').toUpperCase();
+        if (!symbolMatches) continue;
 
         const currentLtp = tick.ltp;
 
         // --- 1. TRAILING STOP LOSS LOGIC ---
         if (
-          (order.orderType === 'SL' || order.orderType === 'SL-M') &&
           order.trailingStopLoss &&
           order.trailingStopLoss > 0 &&
-          order.triggerPrice
+          order.triggerPrice &&
+          order.triggerPrice > 0
         ) {
           const trailStep = order.trailingStopLoss;
 
@@ -422,51 +741,50 @@ export class OrdersService {
           }
         }
 
-        // --- 2. STOP-LOSS & LIMIT AUTO-EXECUTION LOGIC ---
+        // --- 2. STOP-LOSS, TARGET & LIMIT AUTO-EXECUTION LOGIC ---
         let shouldTrigger = false;
         let executionPrice = currentLtp;
 
-        if (order.orderType === 'SL' || order.orderType === 'SL-M') {
-          if (order.triggerPrice) {
-            // SELL SL (Stop Loss hit on price drop: currentLtp <= triggerPrice)
-            if (order.transactionType === 'SELL' && currentLtp <= order.triggerPrice) {
-              shouldTrigger = true;
-              executionPrice = order.orderType === 'SL-M' ? currentLtp : (order.price ?? currentLtp);
-            }
-            // BUY SL (Stop Loss hit on price rise: currentLtp >= triggerPrice)
-            else if (order.transactionType === 'BUY' && currentLtp >= order.triggerPrice) {
-              shouldTrigger = true;
-              executionPrice = order.orderType === 'SL-M' ? currentLtp : (order.price ?? currentLtp);
-            }
+        // (A) Check Stop-Loss Trigger (evaluated on ANY pending order that has triggerPrice set)
+        if (order.triggerPrice && order.triggerPrice > 0) {
+          // SELL SL (Stop Loss hit on price drop: currentLtp <= triggerPrice)
+          if (order.transactionType === 'SELL' && currentLtp <= order.triggerPrice) {
+            shouldTrigger = true;
+            executionPrice = currentLtp;
+            logger.info(`[StopLossEngine] SELL Stop Loss hit for Order #${order.id} (${contract.tradingSymbol}) at LTP ₹${currentLtp} <= SL Trigger ₹${order.triggerPrice}`);
           }
+          // BUY SL (Stop Loss hit on price rise: currentLtp >= triggerPrice)
+          else if (order.transactionType === 'BUY' && currentLtp >= order.triggerPrice) {
+            shouldTrigger = true;
+            executionPrice = currentLtp;
+            logger.info(`[StopLossEngine] BUY Stop Loss hit for Order #${order.id} (${contract.tradingSymbol}) at LTP ₹${currentLtp} >= SL Trigger ₹${order.triggerPrice}`);
+          }
+        }
 
-          // Target Profit Exit
-          if (!shouldTrigger && order.targetPrice) {
-            // SELL Target (Target hit on price rise: currentLtp >= targetPrice)
-            if (order.transactionType === 'SELL' && currentLtp >= order.targetPrice) {
-              shouldTrigger = true;
-              executionPrice = currentLtp;
-              logger.info(`[TargetEngine] Target Profit hit for Order #${order.id} at LTP ₹${currentLtp} >= Target ₹${order.targetPrice}`);
-            }
-            // BUY Target (Short target hit on price drop: currentLtp <= targetPrice)
-            else if (order.transactionType === 'BUY' && currentLtp <= order.targetPrice) {
-              shouldTrigger = true;
-              executionPrice = currentLtp;
-              logger.info(`[TargetEngine] Short Target Profit hit for Order #${order.id} at LTP ₹${currentLtp} <= Target ₹${order.targetPrice}`);
-            }
+        // (B) Check Target Profit Exit (evaluated on ANY pending order that has targetPrice set)
+        if (!shouldTrigger && order.targetPrice && order.targetPrice > 0) {
+          // SELL Target (Target hit on price rise: currentLtp >= targetPrice)
+          if (order.transactionType === 'SELL' && currentLtp >= order.targetPrice) {
+            shouldTrigger = true;
+            executionPrice = currentLtp;
+            logger.info(`[TargetEngine] SELL Target hit for Order #${order.id} (${contract.tradingSymbol}) at LTP ₹${currentLtp} >= Target ₹${order.targetPrice}`);
           }
-        } else if (order.orderType === 'LIMIT') {
-          if (order.price) {
-            // BUY LIMIT (Fill when price drops to or below limit)
-            if (order.transactionType === 'BUY' && currentLtp <= order.price) {
-              shouldTrigger = true;
-              executionPrice = order.price;
-            }
-            // SELL LIMIT (Fill when price rises to or above limit)
-            else if (order.transactionType === 'SELL' && currentLtp >= order.price) {
-              shouldTrigger = true;
-              executionPrice = order.price;
-            }
+          // BUY Target (Short target hit on price drop: currentLtp <= targetPrice)
+          else if (order.transactionType === 'BUY' && currentLtp <= order.targetPrice) {
+            shouldTrigger = true;
+            executionPrice = currentLtp;
+            logger.info(`[TargetEngine] BUY Target hit for Order #${order.id} (${contract.tradingSymbol}) at LTP ₹${currentLtp} <= Target ₹${order.targetPrice}`);
+          }
+        }
+
+        // (C) Standard LIMIT Order Check (only if no SL/Target triggered, and is a LIMIT order)
+        if (!shouldTrigger && order.orderType === 'LIMIT' && order.price && order.price > 0) {
+          if (order.transactionType === 'BUY' && currentLtp <= order.price) {
+            shouldTrigger = true;
+            executionPrice = order.price;
+          } else if (order.transactionType === 'SELL' && currentLtp >= order.price) {
+            shouldTrigger = true;
+            executionPrice = order.price;
           }
         }
 
@@ -482,20 +800,94 @@ export class OrdersService {
             executedAt: new Date().toISOString(),
           });
 
-          // Settle wallet & position
-          const requiredMargin = Number((order.quantity * executionPrice).toFixed(2));
+          // ── Settle wallet & position for auto-executed SL/Target/Limit orders ──
           const wallet = await this.walletRepo.getWalletByUserId(order.userId);
           if (wallet) {
-            const newUtilized =
-              order.transactionType === 'BUY'
-                ? wallet.utilizedMargin + requiredMargin
-                : Math.max(0, wallet.utilizedMargin - requiredMargin);
+            const SPAN_PER_LOT = 115000;
+            const autoLotSize = contract.lotSize || 25;
+            const autoLots = Math.max(1, Math.round(order.quantity / autoLotSize));
 
-            await this.walletRepo.updateWalletBalances(
+            let autoCash = wallet.cashBalance;
+            let autoUtilized = wallet.utilizedMargin;
+            let autoTxnType: import('@trademitra/shared').WalletTxnType = 'ADJUSTMENT';
+            let autoTxnDir: import('@trademitra/shared').WalletTxnDirection = 'DEBIT';
+            let autoTxnAmount = 0;
+            let autoTxnDesc = '';
+
+            const autoExistingPos = await this.positionsRepo.getPosition(
+              order.userId, contract.id, order.productType
+            );
+            const autoNetQty = autoExistingPos?.netQuantity ?? 0;
+
+            if (order.transactionType === 'SELL') {
+              if (autoNetQty > 0) {
+                // Closing a long position via SL/Target SELL
+                const closingQty = Math.min(order.quantity, autoNetQty);
+                const avgBuy = autoExistingPos?.averageBuyPrice ?? 0;
+                const closingBuyMargin = Number((closingQty * avgBuy).toFixed(2));
+                const saleProceeds = Number((closingQty * executionPrice).toFixed(2));
+                const realizedPnl = Number((saleProceeds - closingBuyMargin).toFixed(2));
+                autoUtilized = Math.max(0, wallet.utilizedMargin - closingBuyMargin);
+                autoCash = wallet.cashBalance + realizedPnl;
+                autoTxnType = realizedPnl >= 0 ? 'SELL_CREDIT' : 'BUY_DEBIT';
+                autoTxnDir = realizedPnl >= 0 ? 'CREDIT' : 'DEBIT';
+                autoTxnAmount = Math.abs(realizedPnl);
+                autoTxnDesc = `Auto SELL ${closingQty} qty @ ₹${executionPrice.toFixed(2)} (${order.orderType} exit, P&L: ₹${realizedPnl.toFixed(2)}, margin ₹${closingBuyMargin.toLocaleString('en-IN')} released)`;
+              } else {
+                // Opening a short position via auto-execution — block SPAN margin
+                const spanRequired = Number((autoLots * SPAN_PER_LOT).toFixed(2));
+                autoCash = wallet.cashBalance;
+                autoUtilized = wallet.utilizedMargin + spanRequired;
+                autoTxnType = 'MARGIN_BLOCK';
+                autoTxnDir = 'DEBIT';
+                autoTxnAmount = spanRequired;
+                autoTxnDesc = `Auto SELL ${order.quantity} qty @ ₹${executionPrice.toFixed(2)} (SPAN ₹${spanRequired.toLocaleString('en-IN')} blocked)`;
+              }
+            } else {
+              // BUY auto-execution
+              if (autoNetQty < 0) {
+                // Closing a short position via SL/Target BUY
+                const closingQty = Math.min(order.quantity, Math.abs(autoNetQty));
+                const closingLots = Math.ceil(closingQty / autoLotSize);
+                const spanRelease = closingLots * SPAN_PER_LOT;
+                const avgSell = autoExistingPos?.averageSellPrice ?? 0;
+                const realizedPnl = Number((closingQty * (avgSell - executionPrice)).toFixed(2));
+                autoUtilized = Math.max(0, wallet.utilizedMargin - spanRelease);
+                autoCash = wallet.cashBalance + realizedPnl;
+                autoTxnType = realizedPnl >= 0 ? 'SELL_CREDIT' : 'BUY_DEBIT';
+                autoTxnDir = realizedPnl >= 0 ? 'CREDIT' : 'DEBIT';
+                autoTxnAmount = Math.abs(realizedPnl);
+                autoTxnDesc = `Auto BUY ${closingQty} qty @ ₹${executionPrice.toFixed(2)} (${order.orderType} short cover, P&L: ₹${realizedPnl.toFixed(2)}, SPAN ₹${spanRelease.toLocaleString('en-IN')} released)`;
+              } else {
+                // Opening a fresh long via auto-executed LIMIT (margin was pre-locked at order.price upon creation)
+                const preLocked = Number((order.quantity * (order.price || executionPrice)).toFixed(2));
+                const actualTurnover = Number((order.quantity * executionPrice).toFixed(2));
+                const diff = actualTurnover - preLocked;
+                autoCash = wallet.cashBalance;
+                autoUtilized = Math.max(0, Number((wallet.utilizedMargin + diff).toFixed(2)));
+                autoTxnType = 'BUY_DEBIT';
+                autoTxnDir = 'DEBIT';
+                autoTxnAmount = actualTurnover;
+                autoTxnDesc = `Auto BUY ${order.quantity} qty @ ₹${executionPrice.toFixed(2)} (LIMIT fill, trade active)`;
+              }
+            }
+
+            const finalAutoCash = Math.max(0, Number(autoCash.toFixed(2)));
+            const finalAutoUtilized = Math.max(0, Number(autoUtilized.toFixed(2)));
+            const newAutoAvailable = Math.max(0, finalAutoCash + wallet.pledgeMargin - finalAutoUtilized);
+
+            await this.walletRepo.updateWalletBalances(null, order.userId, finalAutoCash, finalAutoUtilized);
+
+            // Record the auto-execution wallet event in the ledger
+            await this.walletRepo.recordTransaction(
               null,
               order.userId,
-              wallet.cashBalance,
-              newUtilized
+              autoTxnType,
+              autoTxnDir,
+              autoTxnAmount,
+              newAutoAvailable,
+              autoTxnDesc,
+              order.id
             );
           }
 
@@ -505,33 +897,38 @@ export class OrdersService {
             order.productType
           );
 
-          let netQty = existingPos?.netQuantity ?? 0;
-          let buyQty = existingPos?.buyQuantity ?? 0;
-          let sellQty = existingPos?.sellQuantity ?? 0;
-          let buyAmt = existingPos?.buyAmount ?? 0;
-          let sellAmt = existingPos?.sellAmount ?? 0;
-          let realizedPnl = existingPos?.realizedPnl ?? 0;
-          let avgBuy = existingPos?.averageBuyPrice ?? 0;
-          let avgSell = existingPos?.averageSellPrice ?? 0;
+          const isFreshPosition = !existingPos || existingPos.status === 'CLOSED' || existingPos.netQuantity === 0;
+          let netQty = isFreshPosition ? 0 : (existingPos.netQuantity ?? 0);
+          let buyQty = isFreshPosition ? 0 : (existingPos.buyQuantity ?? 0);
+          let sellQty = isFreshPosition ? 0 : (existingPos.sellQuantity ?? 0);
+          let buyAmt = isFreshPosition ? 0 : (existingPos.buyAmount ?? 0);
+          let sellAmt = isFreshPosition ? 0 : (existingPos.sellAmount ?? 0);
+          let realizedPnl = isFreshPosition ? 0 : (existingPos.realizedPnl ?? 0);
+          let avgBuy = isFreshPosition ? 0 : (existingPos.averageBuyPrice ?? 0);
+          let avgSell = isFreshPosition ? 0 : (existingPos.averageSellPrice ?? 0);
+
+          const autoPremium = Number((order.quantity * executionPrice).toFixed(2));
 
           if (order.transactionType === 'BUY') {
             if (netQty < 0) {
               const closingQty = Math.min(order.quantity, Math.abs(netQty));
               realizedPnl += closingQty * (avgSell - executionPrice);
+              avgBuy = executionPrice;
             }
             netQty += order.quantity;
             buyQty += order.quantity;
-            buyAmt += requiredMargin;
-            avgBuy = buyQty > 0 ? Number((buyAmt / buyQty).toFixed(2)) : 0;
+            buyAmt += autoPremium;
+            avgBuy = buyQty > 0 ? Number((buyAmt / buyQty).toFixed(2)) : executionPrice;
           } else {
             if (netQty > 0) {
               const closingQty = Math.min(order.quantity, netQty);
               realizedPnl += closingQty * (executionPrice - avgBuy);
+              avgSell = executionPrice; // Exact executed sell price
             }
             netQty -= order.quantity;
             sellQty += order.quantity;
-            sellAmt += requiredMargin;
-            avgSell = sellQty > 0 ? Number((sellAmt / sellQty).toFixed(2)) : 0;
+            sellAmt += autoPremium;
+            avgSell = (netQty === 0) ? executionPrice : (sellQty > 0 ? Number((sellAmt / sellQty).toFixed(2)) : executionPrice);
           }
 
           await this.positionsRepo.upsertPosition(null, {
@@ -591,6 +988,45 @@ export class OrdersService {
               }
             }
           }
+
+          // Notification ONLY for successfully executed trades (Buy or Sell)
+          const optTypeStr = contract.optionType === 'CE' ? 'Call' : 'Put';
+          let expStr = '';
+          try {
+            const d = new Date(contract.expiryDate);
+            const day = d.getDate();
+            const monNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+            const mon = monNames[d.getMonth()] || '';
+            expStr = `${day} ${mon}`;
+          } catch {
+            expStr = '';
+          }
+          const friendlyName = `${contract.symbol} ${expStr} ${contract.strikePrice} ${optTypeStr}`.trim();
+          const productStr = order.productType === 'MIS' ? 'intraday' : 'delivery';
+
+          await this.notificationsService.notifyUser({
+            userId: order.userId,
+            title: 'Executed',
+            message: `${friendlyName} , ${productStr} ${order.transactionType.toLowerCase()} order for ${order.quantity} qty executed at ₹${executionPrice.toFixed(2)}`,
+            type: 'ORDER',
+            severity: 'SUCCESS',
+            data: {
+              orderId: order.id,
+              contractId: contract.id,
+              tradingSymbol: contract.tradingSymbol,
+              symbol: contract.symbol,
+              strikePrice: Number(contract.strikePrice),
+              optionType: contract.optionType,
+              lotSize: contract.lotSize || 25,
+              ltp: executionPrice,
+              price: executionPrice,
+              quantity: order.quantity,
+              orderType: order.orderType,
+              productType: order.productType,
+              transactionType: order.transactionType,
+              status: 'EXECUTED',
+            },
+          });
 
           // Broadcast order execution event
           this.feedProvider.emit('order:update', { userId: order.userId });

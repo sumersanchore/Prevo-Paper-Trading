@@ -36,6 +36,12 @@ export class ValidationError extends AppError {
   }
 }
 
+export class BadRequestError extends AppError {
+  constructor(message = 'Bad request', details?: any) {
+    super(message, 400, details);
+  }
+}
+
 export class InsufficientFundsError extends AppError {
   constructor(message = 'Insufficient margin available for this trade', details?: any) {
     super(message, 422, details);

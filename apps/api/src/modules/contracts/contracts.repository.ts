@@ -141,64 +141,121 @@ export class ContractsRepository {
 
   private static readonly contractCache = new Map<string, OptionsContractEntity>();
 
-  public async getContractById(id: string): Promise<OptionsContractEntity | null> {
-    if (ContractsRepository.contractCache.has(id)) {
-      return ContractsRepository.contractCache.get(id)!;
+  public async getContractById(identifier: string): Promise<OptionsContractEntity | null> {
+    if (!identifier) return null;
+    const cleanId = identifier.startsWith('dyn_') ? identifier.replace('dyn_', '') : identifier;
+
+    if (ContractsRepository.contractCache.has(cleanId)) {
+      return ContractsRepository.contractCache.get(cleanId)!;
+    }
+    if (ContractsRepository.contractCache.has(identifier)) {
+      return ContractsRepository.contractCache.get(identifier)!;
     }
 
-    // 1. Check if ID is a dynamic trading symbol reference (e.g. dyn_NIFTY_25AUG_24250_CE)
-    if (id.startsWith('dyn_')) {
-      const tradingSymbol = id.replace('dyn_', '');
-      const parts = tradingSymbol.split('_'); // [NIFTY, 25AUG, 24250, CE]
-      if (parts.length >= 4) {
-        const symbol = parts[0]!;
-        const strike = parseFloat(parts[2]!);
-        const optionType = parts[3]! as 'CE' | 'PE';
-        const lotSize = symbol === 'BANKNIFTY' ? 15 : 25;
-        const entity: OptionsContractEntity = {
-          id,
-          symbol,
-          tradingSymbol,
-          expiryDate: '2026-08-25',
-          strikePrice: strike,
-          optionType,
-          lotSize,
-          freezeLimit: symbol === 'BANKNIFTY' ? 900 : 1800,
-          exchange: 'NFO',
-          isActive: true,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-        ContractsRepository.contractCache.set(id, entity);
-        ContractsRepository.contractCache.set(tradingSymbol, entity);
-        return entity;
-      }
-    }
+    const isNumeric = /^\d+$/.test(cleanId);
 
     try {
-      const result = await db.query<IContractRow>(
-        `SELECT id, symbol, trading_symbol, expiry_date, strike_price, option_type, lot_size, freeze_limit, exchange, is_active, created_at, updated_at
-         FROM options_contracts
-         WHERE id = $1 OR trading_symbol = $1`,
-        [id]
-      );
+      let result;
+      if (isNumeric) {
+        result = await db.query<IContractRow>(
+          `SELECT id, symbol, trading_symbol, expiry_date, strike_price, option_type, lot_size, freeze_limit, exchange, is_active, created_at, updated_at
+           FROM options_contracts
+           WHERE id = $1`,
+          [cleanId]
+        );
+      } else {
+        result = await db.query<IContractRow>(
+          `SELECT id, symbol, trading_symbol, expiry_date, strike_price, option_type, lot_size, freeze_limit, exchange, is_active, created_at, updated_at
+           FROM options_contracts
+           WHERE trading_symbol = $1`,
+          [cleanId]
+        );
+      }
 
       if (result.rows.length > 0) {
         const entity = this.mapRowToEntity(result.rows[0]!);
-        ContractsRepository.contractCache.set(id, entity);
         ContractsRepository.contractCache.set(entity.id, entity);
         ContractsRepository.contractCache.set(entity.tradingSymbol, entity);
+        ContractsRepository.contractCache.set(identifier, entity);
         return entity;
       }
     } catch {
-      // Fallback
+      // Fallback to insertion/in-memory
     }
 
-    const fallback = ContractsRepository.fallbackContracts.find((c) => c.id === id || c.tradingSymbol === id) ?? null;
+    // If dynamic contract not yet in DB, insert it into options_contracts to get a real numeric ID
+    const parts = cleanId.split('_'); // [NIFTY, 20AUG, 24250, CE]
+    if (parts.length >= 4) {
+      const symbol = parts[0]!;
+      const expCode = parts[1]!;
+      const strike = parseFloat(parts[2]!);
+      const optionType = parts[3]! as 'CE' | 'PE';
+      const lotSize = symbol === 'BANKNIFTY' ? 15 : 25;
+      const freezeLimit = symbol === 'BANKNIFTY' ? 900 : 1800;
+
+      const day = expCode.slice(0, 2);
+      const monStr = expCode.slice(2).toUpperCase();
+      const monMap: Record<string, string> = {
+        JAN: '01', FEB: '02', MAR: '03', APR: '04', MAY: '05', JUN: '06',
+        JUL: '07', AUG: '08', SEP: '09', OCT: '10', NOV: '11', DEC: '12',
+      };
+      const mon = monMap[monStr] || '08';
+      const expiryDate = `2026-${mon}-${day}`;
+
+      try {
+        const insertRes = await db.query<IContractRow>(
+          `INSERT INTO options_contracts (symbol, trading_symbol, expiry_date, strike_price, option_type, lot_size, freeze_limit, exchange, is_active)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'NFO', TRUE)
+           ON CONFLICT (trading_symbol) DO UPDATE SET is_active = TRUE
+           RETURNING id, symbol, trading_symbol, expiry_date, strike_price, option_type, lot_size, freeze_limit, exchange, is_active, created_at, updated_at`,
+          [symbol, cleanId, expiryDate, strike, optionType, lotSize, freezeLimit]
+        );
+
+        if (insertRes.rows.length > 0) {
+          const entity = this.mapRowToEntity(insertRes.rows[0]!);
+          ContractsRepository.contractCache.set(entity.id, entity);
+          ContractsRepository.contractCache.set(entity.tradingSymbol, entity);
+          ContractsRepository.contractCache.set(identifier, entity);
+          return entity;
+        }
+      } catch {
+        // Fallback
+      }
+    }
+
+    const fallback = ContractsRepository.fallbackContracts.find((c) => c.id === cleanId || c.tradingSymbol === cleanId) ?? null;
     if (fallback) {
-      ContractsRepository.contractCache.set(id, fallback);
+      try {
+        const insertRes = await db.query<IContractRow>(
+          `INSERT INTO options_contracts (symbol, trading_symbol, expiry_date, strike_price, option_type, lot_size, freeze_limit, exchange, is_active)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE)
+           ON CONFLICT (trading_symbol) DO UPDATE SET is_active = TRUE
+           RETURNING id, symbol, trading_symbol, expiry_date, strike_price, option_type, lot_size, freeze_limit, exchange, is_active, created_at, updated_at`,
+          [
+            fallback.symbol,
+            fallback.tradingSymbol,
+            fallback.expiryDate,
+            fallback.strikePrice,
+            fallback.optionType,
+            fallback.lotSize,
+            fallback.freezeLimit,
+            fallback.exchange || 'NFO',
+          ]
+        );
+        if (insertRes.rows.length > 0) {
+          const entity = this.mapRowToEntity(insertRes.rows[0]!);
+          ContractsRepository.contractCache.set(entity.id, entity);
+          ContractsRepository.contractCache.set(entity.tradingSymbol, entity);
+          ContractsRepository.contractCache.set(identifier, entity);
+          return entity;
+        }
+      } catch {
+        // DB not available or table locked
+      }
+
       ContractsRepository.contractCache.set(fallback.id, fallback);
       ContractsRepository.contractCache.set(fallback.tradingSymbol, fallback);
+      ContractsRepository.contractCache.set(identifier, fallback);
     }
     return fallback;
   }

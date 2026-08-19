@@ -29,6 +29,14 @@ export class SocketStreamHandler {
       const ticks = this.feedProvider.getAllTicks();
       socket.emit('ticks:snapshot', ticks);
 
+      // User room subscription for user-specific trade & notification streams
+      socket.on('subscribe:user', (userId: string) => {
+        if (userId) {
+          socket.join(`user:${userId}`);
+          logger.debug(`[SocketStream] Client ${socket.id} subscribed to user:${userId}`);
+        }
+      });
+
       // Room subscriptions
       socket.on('subscribe:symbol', (symbol: string) => {
         socket.join(`symbol:${symbol}`);
@@ -70,7 +78,18 @@ export class SocketStreamHandler {
     });
 
     this.feedProvider.on('order:update', (data: any) => {
+      if (data?.userId) {
+        this.io.to(`user:${data.userId}`).emit('order:update', data);
+      }
       this.io.emit('order:update', data);
+    });
+
+    this.feedProvider.on('notification:new', (notif: any) => {
+      if (notif?.userId) {
+        this.io.to(`user:${notif.userId}`).emit('notification:new', notif);
+      }
+      // Broadcast common notifications to all
+      this.io.emit('notification:new', notif);
     });
   }
 

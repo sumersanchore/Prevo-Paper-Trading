@@ -40,8 +40,8 @@ export function getDynamicExpiries(symbol = 'NIFTY', count = 8): DynamicExpiry[]
   const now = new Date();
   const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 
-  // 1. BANK NIFTY Series (Tuesday: 25 Aug, 29 Sep, 27 Oct, 24 Nov, 29 Dec)
-  if (sym === 'BANKNIFTY') {
+  // 1. BANK NIFTY & FIN NIFTY Series (Tuesday: 25 Aug, 29 Sep, 27 Oct, 24 Nov, 29 Dec)
+  if (sym === 'BANKNIFTY' || sym === 'FINNIFTY') {
     const bankDates = [
       { year: 2026, month: 7, day: 25, code: '25AUG', formatted: '25 Aug', isMonthly: true },
       { year: 2026, month: 8, day: 29, code: '29SEP', formatted: '29 Sep', isMonthly: true },
@@ -65,8 +65,8 @@ export function getDynamicExpiries(symbol = 'NIFTY', count = 8): DynamicExpiry[]
     });
   }
 
-  // 2. SENSEX Series (Friday weekly settlements)
-  if (sym === 'SENSEX') {
+  // 2. SENSEX & BANKEX Series (BSE Friday weekly settlements)
+  if (sym === 'SENSEX' || sym === 'BANKEX') {
     const expiries: DynamicExpiry[] = [];
     let current = new Date(today);
     while (current.getUTCDay() !== 5 || current.getTime() <= today.getTime()) {

@@ -117,7 +117,49 @@ export class McpFeedProvider extends EventEmitter {
       timestamp: new Date().toISOString(),
     });
 
-    // 4. Stocks
+    // 4. FIN NIFTY (LTP: 23,890.00, Prev Close: 24,000.00 -> Change: -110.00, -0.46%)
+    this.indexCache.set('FINNIFTY', {
+      symbol: 'FINNIFTY',
+      name: 'FIN NIFTY',
+      ltp: 23890.00,
+      open: 23950.00,
+      high: 24010.00,
+      low: 23850.00,
+      close: 24000.00,
+      change: -110.00,
+      pChange: -0.46,
+      timestamp: new Date().toISOString(),
+    });
+
+    // 5. MIDCAP NIFTY (LTP: 12,450.00, Prev Close: 12,405.00 -> Change: 45.00, +0.36%)
+    this.indexCache.set('MIDCPNIFTY', {
+      symbol: 'MIDCPNIFTY',
+      name: 'MIDCAP NIFTY',
+      ltp: 12450.00,
+      open: 12400.00,
+      high: 12480.00,
+      low: 12390.00,
+      close: 12405.00,
+      change: 45.00,
+      pChange: 0.36,
+      timestamp: new Date().toISOString(),
+    });
+
+    // 6. BANKEX (LTP: 62,340.00, Prev Close: 62,530.00 -> Change: -190.00, -0.30%)
+    this.indexCache.set('BANKEX', {
+      symbol: 'BANKEX',
+      name: 'BANKEX',
+      ltp: 62340.00,
+      open: 62500.00,
+      high: 62650.00,
+      low: 62280.00,
+      close: 62530.00,
+      change: -190.00,
+      pChange: -0.30,
+      timestamp: new Date().toISOString(),
+    });
+
+    // 7. Stocks
     this.indexCache.set('BOSCH', {
       symbol: 'BOSCH',
       name: 'Bosch',
@@ -199,6 +241,41 @@ export class McpFeedProvider extends EventEmitter {
     this.recalculateOptionStrikes();
   }
 
+  public getSpotForSymbol(symbol: string): number {
+    const sym = symbol.toUpperCase().replace(/\s+/g, '');
+    let indexName = 'NIFTY 50';
+    let defaultSpot = 24154.90;
+
+    if (sym === 'BANKNIFTY') {
+      indexName = 'BANK NIFTY';
+      defaultSpot = 57262.40;
+    } else if (sym === 'SENSEX') {
+      indexName = 'SENSEX';
+      defaultSpot = 77235.46;
+    } else if (sym === 'FINNIFTY') {
+      indexName = 'FIN NIFTY';
+      defaultSpot = 23890.00;
+    } else if (sym === 'MIDCPNIFTY') {
+      indexName = 'MIDCAP NIFTY';
+      defaultSpot = 12450.00;
+    } else if (sym === 'BANKEX') {
+      indexName = 'BANKEX';
+      defaultSpot = 62340.00;
+    } else if (sym === 'BOSCH') {
+      indexName = 'BOSCH';
+      defaultSpot = 48730.00;
+    } else if (sym === 'TUBEINVEST') {
+      indexName = 'TUBEINVEST';
+      defaultSpot = 2959.00;
+    } else if (sym === 'HDFCBANK') {
+      indexName = 'HDFCBANK';
+      defaultSpot = 723.00;
+    }
+
+    const cached = this.indexCache.get(sym) || this.indexCache.get(indexName);
+    return cached?.ltp || defaultSpot;
+  }
+
   /**
    * Recalculates option prices dynamically from current spot price and real calendar expiries
    */
@@ -208,7 +285,7 @@ export class McpFeedProvider extends EventEmitter {
     // 1. DYNAMIC NIFTY OPTION SERIES (Thursday weekly settlement)
     const niftyExpiries = getDynamicExpiries('NIFTY', 8);
     const niftySpot = this.indexCache.get('NIFTY 50')?.ltp || 24154.90;
-    const niftyStrikes = getDynamicStrikes(niftySpot, 50, 17);
+    const niftyStrikes = getDynamicStrikes(niftySpot, 50, 15);
 
     for (const exp of niftyExpiries) {
       for (const strike of niftyStrikes) {
@@ -267,7 +344,7 @@ export class McpFeedProvider extends EventEmitter {
     // 2. DYNAMIC BANK NIFTY OPTION SERIES (Wednesday weekly settlement)
     const bankExpiries = getDynamicExpiries('BANKNIFTY', 8);
     const bankSpot = this.indexCache.get('BANK NIFTY')?.ltp || 57262.40;
-    const bankStrikes = getDynamicStrikes(bankSpot, 100, 17);
+    const bankStrikes = getDynamicStrikes(bankSpot, 100, 15);
 
     for (const exp of bankExpiries) {
       for (const strike of bankStrikes) {
@@ -320,6 +397,40 @@ export class McpFeedProvider extends EventEmitter {
         };
         this.ticksCache.set(peSymbol, peTick);
         updatedTicksBatch.push(peTick);
+      }
+    }
+
+    // 3. RECALCULATE ANY OTHER ACTIVE TRADED CONTRACTS IN CACHE (e.g. SENSEX, BANKEX, FINNIFTY, MIDCPNIFTY, custom expiries)
+    for (const [symKey, existingTick] of this.ticksCache.entries()) {
+      if (updatedTicksBatch.some((t) => t.tradingSymbol === symKey)) continue;
+
+      const parts = symKey.split('_'); // [BANKEX, 25AUG, 62000, CE]
+      if (parts.length >= 4) {
+        const symbol = parts[0]!;
+        const strike = parseFloat(parts[2]!);
+        const optionType = parts[3]! as 'CE' | 'PE';
+        const spot = this.getSpotForSymbol(symbol);
+        const pricing = calculateOptionPricing(spot, strike, optionType, 6);
+
+        // Add small realistic tick momentum
+        const jitter = (Math.random() - 0.49) * 0.004;
+        const ltp = Number((pricing.ltp * (1 + jitter)).toFixed(2));
+        const close = existingTick.close || pricing.ltp;
+        const change = Number((ltp - close).toFixed(2));
+        const pChange = close > 0 ? Number(((change / close) * 100).toFixed(2)) : 0;
+
+        const tick: LiveTickData = {
+          ...existingTick,
+          ltp,
+          high: Math.max(existingTick.high || ltp, ltp),
+          low: Math.min(existingTick.low || ltp, ltp),
+          change,
+          pChange,
+          timestamp: new Date().toISOString(),
+        };
+
+        this.ticksCache.set(symKey, tick);
+        updatedTicksBatch.push(tick);
       }
     }
 
@@ -459,7 +570,39 @@ export class McpFeedProvider extends EventEmitter {
   }
 
   public getLatestTick(tradingSymbol: string): LiveTickData | undefined {
-    return this.ticksCache.get(tradingSymbol);
+    let tick = this.ticksCache.get(tradingSymbol);
+    if (tick) return tick;
+
+    const parts = tradingSymbol.split('_');
+    if (parts.length >= 4) {
+      const symbol = parts[0]!;
+      const strike = parseFloat(parts[2]!);
+      const optionType = parts[3]! as 'CE' | 'PE';
+      const spotPrice =
+        (symbol === 'BANKNIFTY'
+          ? this.indexCache.get('BANK NIFTY')?.ltp
+          : this.indexCache.get('NIFTY 50')?.ltp) || 24154.90;
+      const pricing = calculateOptionPricing(spotPrice, strike, optionType, 6);
+
+      tick = {
+        symbol,
+        tradingSymbol,
+        ltp: pricing.ltp,
+        open: Number((pricing.ltp * 0.98).toFixed(2)),
+        high: Number((pricing.ltp * 1.05).toFixed(2)),
+        low: Number((pricing.ltp * 0.95).toFixed(2)),
+        close: Number((pricing.ltp * 0.99).toFixed(2)),
+        volume: pricing.volume,
+        oi: pricing.oi,
+        change: Number((pricing.ltp * 0.015).toFixed(2)),
+        pChange: 1.5,
+        timestamp: new Date().toISOString(),
+      };
+      this.ticksCache.set(tradingSymbol, tick);
+      return tick;
+    }
+
+    return undefined;
   }
 
   public getAllTicks(): LiveTickData[] {

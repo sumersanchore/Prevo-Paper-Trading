@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { useTradingStore, type SelectedContract } from '../../app/store/useTradingStore.js';
-import { formatINR, formatNumber } from '../../lib/utils.js';
+import type { OptionOrderEntity } from '@trademitra/shared';
+import { useToast } from '../../components/ui/Toast.js';
+import { formatNumber } from '../../lib/utils.js';
 import {
   ArrowUpRight,
   X,
@@ -11,10 +13,31 @@ import {
   ArrowLeft,
   ShieldAlert,
   Clock,
+  AlertTriangle,
+  RotateCcw,
 } from 'lucide-react';
-import type { OptionOrderEntity } from '@trademitra/shared';
+const formatDisplaySymbol = (sym?: string) => {
+  if (!sym) return '';
+  const parts = sym.split('_');
+  if (parts.length >= 4) {
+    const symbol = parts[0]!;
+    const expCode = parts[1]!;
+    const day = expCode.slice(0, 2);
+    const mon = expCode.slice(2).toUpperCase();
+    const monMap: Record<string, string> = {
+      JAN: 'Jan', FEB: 'Feb', MAR: 'Mar', APR: 'Apr', MAY: 'May', JUN: 'Jun',
+      JUL: 'Jul', AUG: 'Aug', SEP: 'Sep', OCT: 'Oct', NOV: 'Nov', DEC: 'Dec',
+    };
+    const monStr = monMap[mon] || mon;
+    const strike = parts[2]!;
+    const typeStr = parts[3] === 'PE' ? 'Put' : 'Call';
+    return `${symbol} ${day} ${monStr} ${strike} ${typeStr}`;
+  }
+  return sym;
+};
 
 export const OrderBookTable: React.FC = () => {
+  const toast = useToast();
   const {
     orders,
     setActiveTab,
@@ -24,7 +47,6 @@ export const OrderBookTable: React.FC = () => {
     openOrderPad,
     optionChain,
     positionsSummary,
-    wallet,
   } = useTradingStore();
 
   const [filter, setFilter] = useState<'ALL' | 'EXECUTED' | 'PENDING' | 'REJECTED' | 'CANCELLED'>('ALL');
@@ -40,16 +62,24 @@ export const OrderBookTable: React.FC = () => {
   const [editTrailingStopLoss, setEditTrailingStopLoss] = useState<string>('');
   const [editLots, setEditLots] = useState<number>(1);
   const [isTrailEnabled, setIsTrailEnabled] = useState<boolean>(true);
-  const [activeKeypadField, setActiveKeypadField] = useState<'price' | 'sl' | 'target'>('price');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
   // Modal state for Option & Order details
   const [selectedOrderDetails, setSelectedOrderDetails] = useState<OptionOrderEntity | null>(null);
 
+  // Confirmation modals state
+  const [orderToCancel, setOrderToCancel] = useState<OptionOrderEntity | null>(null);
+  const [showCancelAllConfirm, setShowCancelAllConfirm] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
+
   const pendingOrdersCount = orders.filter((o) => o.status === 'PENDING').length;
 
-  const filteredOrders = orders.filter((o) => {
+  const sortedOrders = [...orders].sort(
+    (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+  );
+
+  const filteredOrders = sortedOrders.filter((o) => {
     if (filter === 'ALL') return true;
     return o.status === filter;
   });
@@ -99,21 +129,18 @@ export const OrderBookTable: React.FC = () => {
       optionType: (order.optionType as 'CE' | 'PE') || 'CE',
       lotSize,
       ltp: livePrice,
-      defaultAction: order.transactionType,
+      defaultAction: 'BUY', // Select BUY by default when retrying
       defaultOrderType: order.orderType === 'MARKET' ? 'MARKET' : 'LIMIT',
-      defaultProductType: order.productType,
+      defaultProductType: order.productType || 'NRML',
       defaultLots: lots,
       defaultLimitPrice: order.price ? String(order.price) : (livePrice ? String(livePrice) : ''),
-      defaultTriggerPrice: order.triggerPrice ? String(order.triggerPrice) : '',
-      defaultTargetPrice: order.targetPrice ? String(order.targetPrice) : '',
+      defaultTriggerPrice: '',
+      defaultTargetPrice: '',
     };
 
     openOrderPad(contractToOrder);
     if (selectedOrderDetails) {
       setSelectedOrderDetails(null);
-    }
-    if (activeSheetOrder) {
-      setActiveSheetOrder(null);
     }
   };
 
@@ -131,7 +158,6 @@ export const OrderBookTable: React.FC = () => {
     setEditTargetPrice(order.targetPrice !== undefined && order.targetPrice !== null ? String(order.targetPrice) : '');
     setEditTrailingStopLoss(order.trailingStopLoss !== undefined && order.trailingStopLoss !== null ? String(order.trailingStopLoss) : '20.0');
     setIsTrailEnabled(Boolean(order.trailingStopLoss && order.trailingStopLoss > 0));
-    setActiveKeypadField('price');
   };
 
   // Convert Limit Order to Immediate Market Execution ("Buy/Sell at market price")
@@ -141,45 +167,15 @@ export const OrderBookTable: React.FC = () => {
       await modifyOrder(order.id, {
         price: livePrice > 0 ? livePrice : undefined,
       });
+      toast.success(
+        'Order Converted to Market',
+        `Order #${order.id} updated to live market price ₹${formatNumber(livePrice)}`
+      );
       setActiveSheetOrder(null);
     } catch (err: any) {
-      setErrorMsg(err?.response?.data?.error?.message || 'Failed to convert order to market price.');
-    }
-  };
-
-  // Stepper helper
-  const handleStepPrice = (delta: number) => {
-    const current = parseFloat(editPrice) || (modifyingOrder ? getLiveLtp(modifyingOrder) : 0);
-    const nextVal = Math.max(0.05, Number((current + delta).toFixed(2)));
-    setEditPrice(String(nextVal));
-  };
-
-  // Keypad button click
-  const handleKeypadPress = (val: string) => {
-    if (activeKeypadField === 'price') {
-      if (val === 'BACKSPACE') {
-        setEditPrice((prev) => prev.slice(0, -1));
-      } else if (val === '.' && editPrice.includes('.')) {
-        return;
-      } else {
-        setEditPrice((prev) => prev + val);
-      }
-    } else if (activeKeypadField === 'sl') {
-      if (val === 'BACKSPACE') {
-        setEditTriggerPrice((prev) => prev.slice(0, -1));
-      } else if (val === '.' && editTriggerPrice.includes('.')) {
-        return;
-      } else {
-        setEditTriggerPrice((prev) => prev + val);
-      }
-    } else if (activeKeypadField === 'target') {
-      if (val === 'BACKSPACE') {
-        setEditTargetPrice((prev) => prev.slice(0, -1));
-      } else if (val === '.' && editTargetPrice.includes('.')) {
-        return;
-      } else {
-        setEditTargetPrice((prev) => prev + val);
-      }
+      const msg = err?.response?.data?.error?.message || err?.message || 'Failed to convert order to market price.';
+      setErrorMsg(msg);
+      toast.error('Market Conversion Failed', msg);
     }
   };
 
@@ -212,27 +208,48 @@ export const OrderBookTable: React.FC = () => {
         payload.price = p;
       }
 
+      const liveLtp = getLiveLtp(modifyingOrder);
       const execPrice =
         payload.price !== undefined
           ? payload.price
-          : (modifyingOrder.price || modifyingOrder.averagePrice || getLiveLtp(modifyingOrder) || 0);
-      const isBuy = modifyingOrder.transactionType === 'BUY';
+          : (modifyingOrder.price || modifyingOrder.averagePrice || liveLtp || 0);
+
+      const matchedPos = positionsSummary?.positions.find(
+        (p) => p.tradingSymbol === modifyingOrder.tradingSymbol || p.contractId === modifyingOrder.contractId
+      );
+      const isLongTrade = matchedPos
+        ? (matchedPos.netQuantity > 0 || (matchedPos.netQuantity === 0 && modifyingOrder.transactionType === 'BUY'))
+        : (modifyingOrder.transactionType === 'BUY' || (modifyingOrder.triggerPrice !== undefined && modifyingOrder.triggerPrice < liveLtp));
+
+      const tp = editTriggerPrice !== '' ? parseFloat(editTriggerPrice) : NaN;
+      const tgt = editTargetPrice !== '' ? parseFloat(editTargetPrice) : NaN;
 
       // Check if this order has Stop Loss protection attached
-      if (editTriggerPrice !== '') {
-        const tp = parseFloat(editTriggerPrice);
-        if (isNaN(tp) || tp <= 0) {
-          setErrorMsg('Please enter a valid Stop Loss trigger price.');
-          setIsSubmitting(false);
-          return;
-        }
-
-        if (execPrice > 0 && tp >= execPrice) {
-          setErrorMsg(
-            `Stop Loss price (₹${tp.toFixed(2)}) cannot be greater than or equal to Buy price (₹${formatNumber(execPrice)}). Stop loss must be below your buy amount.`
-          );
-          setIsSubmitting(false);
-          return;
+      if (!isNaN(tp) && tp > 0) {
+        if (liveLtp > 0) {
+          if (isLongTrade) {
+            if (tp >= liveLtp) {
+              setErrorMsg(`Stop Loss (₹${tp.toFixed(2)}) must be strictly less than live LTP (₹${formatNumber(liveLtp)}).`);
+              setIsSubmitting(false);
+              return;
+            }
+            if (!isNaN(tgt) && tgt > 0 && tp >= tgt) {
+              setErrorMsg(`Stop Loss (₹${tp.toFixed(2)}) must be strictly less than Target (₹${tgt.toFixed(2)}).`);
+              setIsSubmitting(false);
+              return;
+            }
+          } else {
+            if (tp <= liveLtp) {
+              setErrorMsg(`Stop Loss (₹${tp.toFixed(2)}) must be strictly greater than live LTP (₹${formatNumber(liveLtp)}).`);
+              setIsSubmitting(false);
+              return;
+            }
+            if (!isNaN(tgt) && tgt > 0 && tp <= tgt) {
+              setErrorMsg(`Stop Loss (₹${tp.toFixed(2)}) must be strictly greater than Target (₹${tgt.toFixed(2)}).`);
+              setIsSubmitting(false);
+              return;
+            }
+          }
         }
         payload.triggerPrice = tp;
 
@@ -244,28 +261,45 @@ export const OrderBookTable: React.FC = () => {
         }
       }
 
-      if (editTargetPrice !== '') {
-        const tgt = parseFloat(editTargetPrice);
-        if (isNaN(tgt) || tgt <= 0) {
-          setErrorMsg('Please enter a valid Target exit price.');
-          setIsSubmitting(false);
-          return;
-        }
-
-        if (execPrice > 0 && tgt <= execPrice) {
-          setErrorMsg(
-            `Target price (₹${tgt.toFixed(2)}) must be greater than Buy price (₹${formatNumber(execPrice)}).`
-          );
-          setIsSubmitting(false);
-          return;
+      if (!isNaN(tgt) && tgt > 0) {
+        if (liveLtp > 0) {
+          if (isLongTrade) {
+            if (tgt <= liveLtp) {
+              setErrorMsg(`Target price (₹${tgt.toFixed(2)}) must be strictly greater than live LTP (₹${formatNumber(liveLtp)}).`);
+              setIsSubmitting(false);
+              return;
+            }
+            if (!isNaN(tp) && tp > 0 && tgt <= tp) {
+              setErrorMsg(`Target price (₹${tgt.toFixed(2)}) must be strictly greater than Stop Loss (₹${tp.toFixed(2)}).`);
+              setIsSubmitting(false);
+              return;
+            }
+          } else {
+            if (tgt >= liveLtp) {
+              setErrorMsg(`Target price (₹${tgt.toFixed(2)}) must be strictly less than live LTP (₹${formatNumber(liveLtp)}).`);
+              setIsSubmitting(false);
+              return;
+            }
+            if (!isNaN(tp) && tp > 0 && tgt >= tp) {
+              setErrorMsg(`Target price (₹${tgt.toFixed(2)}) must be strictly less than Stop Loss (₹${tp.toFixed(2)}).`);
+              setIsSubmitting(false);
+              return;
+            }
+          }
         }
         payload.targetPrice = tgt;
       }
 
       await modifyOrder(modifyingOrder.id, payload);
+      toast.success(
+        'Order Modified Successfully',
+        `Order #${modifyingOrder.id} updated to price ₹${formatNumber(execPrice)} (${totalQty} qty)`
+      );
       setModifyingOrder(null);
     } catch (err: any) {
-      setErrorMsg(err?.response?.data?.error?.message || 'Failed to modify order.');
+      const msg = err?.response?.data?.error?.message || err?.message || 'Failed to modify order.';
+      setErrorMsg(msg);
+      toast.error('Modification Failed', msg);
     } finally {
       setIsSubmitting(false);
     }
@@ -303,34 +337,52 @@ export const OrderBookTable: React.FC = () => {
 
   return (
     <div className="space-y-4">
-      {/* Header bar with Filter Tabs and Cancel All Orders CTA */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2 overflow-x-auto pb-1 max-w-full">
-          {(['ALL', 'PENDING', 'EXECUTED', 'CANCELLED', 'REJECTED'] as const).map((tab) => (
-            <button
-              key={tab}
-              onClick={() => setFilter(tab)}
-              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all whitespace-nowrap cursor-pointer ${
-                filter === tab
-                  ? 'bg-groww-surface text-white border border-groww-borderLight shadow-sm'
-                  : 'text-groww-textMuted hover:text-white bg-groww-card border border-groww-border'
-              }`}
-            >
-              {tab === 'ALL' ? 'All Orders' : tab === 'PENDING' ? 'Open Orders' : tab.charAt(0) + tab.slice(1).toLowerCase()}
-              {tab === 'PENDING' && pendingOrdersCount > 0 && (
-                <span className="ml-1.5 px-1.5 py-0.2 rounded-full bg-yellow-500/20 text-yellow-400 text-[10px]">
-                  {pendingOrdersCount}
+      {/* Header bar with Clean Minimal Filter Tabs and Cancel All Orders CTA */}
+      <div className="flex flex-wrap items-center justify-between gap-2.5">
+        <div className="inline-flex items-center p-1 rounded-xl bg-slate-100 border border-slate-200/80 max-w-full overflow-x-auto no-scrollbar">
+          {(['ALL', 'PENDING', 'EXECUTED', 'CANCELLED', 'REJECTED'] as const).map((tab) => {
+            const isActive = filter === tab;
+            return (
+              <button
+                key={tab}
+                onClick={() => setFilter(tab)}
+                className={`px-3 py-1 rounded-lg text-xs font-bold transition-all whitespace-nowrap cursor-pointer flex items-center gap-1.5 ${
+                  isActive
+                    ? 'bg-white text-slate-900 shadow-2xs border border-slate-200/60'
+                    : 'text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                <span>
+                  {tab === 'ALL'
+                    ? 'All'
+                    : tab === 'PENDING'
+                    ? 'Open'
+                    : tab === 'EXECUTED'
+                    ? 'Executed'
+                    : tab === 'CANCELLED'
+                    ? 'Cancelled'
+                    : 'Rejected'}
                 </span>
-              )}
-            </button>
-          ))}
+                {tab === 'PENDING' && pendingOrdersCount > 0 && (
+                  <span
+                    className={`px-1.5 py-0.2 rounded-full text-[10px] font-black ${
+                      isActive ? 'bg-amber-100 text-amber-900' : 'bg-slate-200 text-slate-700'
+                    }`}
+                  >
+                    {pendingOrdersCount}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
 
         {/* Cancel All Pending Orders Button */}
         {pendingOrdersCount > 0 && (
           <button
-            onClick={() => cancelAllOrders()}
-            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-[#EB5B5B] border border-rose-500/30 text-xs font-bold transition-all shadow-sm cursor-pointer"
+            type="button"
+            onClick={() => setShowCancelAllConfirm(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 text-xs font-bold transition-all shadow-2xs cursor-pointer"
             title="Cancel all pending orders"
           >
             <X className="w-3.5 h-3.5" />
@@ -339,231 +391,163 @@ export const OrderBookTable: React.FC = () => {
         )}
       </div>
 
-      {/* Orders Container (Matching Groww Screenshot 1 & 3) */}
-      <div className="rounded-2xl border border-[#1E2638] bg-[#0F131C] overflow-hidden shadow-2xl divide-y divide-[#1E2638]">
-        {filteredOrders.length === 0 ? (
-          <div className="p-8 text-center text-xs text-gray-400">
-            No orders found in <span className="text-white font-bold">{filter}</span> category.
-          </div>
-        ) : (
-          filteredOrders.map((order) => {
-            const isBuy = order.transactionType === 'BUY';
-            const livePrice = getLiveLtp(order);
-            const lotSize = getLotSize(order);
-            const lots = Math.max(1, Math.round(order.quantity / lotSize));
-            const hasProtection = hasSLorTarget(order);
-            const isPending = order.status === 'PENDING';
+      {/* Orders Container */}
+      <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden shadow-xs">
+        <div className="px-4 py-3 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
+          <h2 className="text-sm font-bold text-slate-900">
+            Today's Equity F&O Orders ({filteredOrders.length})
+          </h2>
+        </div>
 
-            return (
-              <div
-                key={order.id}
-                onClick={() => {
-                  if (isPending) {
-                    setActiveSheetOrder(order);
-                  } else {
-                    setSelectedOrderDetails(order);
-                  }
-                }}
-                className="p-4 space-y-2 hover:bg-[#141A26] active:bg-[#1A2233] transition-colors cursor-pointer"
-              >
-                {/* Top Line: Tag (BUY + TSL/TGT • BSE vs BUY • BSE) & Product Type (Delivery / Intraday) */}
-                <div className="flex items-center justify-between">
-                  <div className="text-xs font-bold flex items-center gap-1.5">
-                    {/* Tag badge with + TSL/TGT if Stop Loss is present */}
-                    <span className={isBuy ? 'text-[#00D09C]' : 'text-[#EB5B5B]'}>
+        <div className="divide-y divide-slate-100">
+          {filteredOrders.length === 0 ? (
+            <div className="p-8 text-center text-xs text-slate-400">
+              No orders found in <span className="text-slate-900 font-bold">{filter}</span> category.
+            </div>
+          ) : (
+            filteredOrders.map((order) => {
+              const isBuy = order.transactionType === 'BUY';
+              const isPending = order.status === 'PENDING';
+              const isExecuted = order.status === 'EXECUTED';
+              const isInactive = order.status === 'CANCELLED' || order.status === 'REJECTED';
+
+              // Format execution or limit/trigger price description
+              let priceDesc = 'Market';
+              if (isExecuted) {
+                priceDesc = `Avg at ₹${formatNumber(order.averagePrice || order.price || 0)}`;
+              } else if (order.triggerPrice) {
+                priceDesc = `SL at ₹${formatNumber(order.triggerPrice)}`;
+              } else if (order.price) {
+                priceDesc = `Limit at ₹${formatNumber(order.price)}`;
+              } else if (order.status === 'CANCELLED') {
+                priceDesc = `Cancelled at ₹${formatNumber(order.price || 0)}`;
+              } else if (order.status === 'REJECTED') {
+                priceDesc = `Rejected`;
+              }
+
+              // Time formatting (e.g. 3:31 PM)
+              const timeStr = order.executedAt
+                ? new Date(order.executedAt).toLocaleTimeString('en-IN', {
+                    hour: 'numeric',
+                    minute: '2-digit',
+                    hour12: true,
+                  })
+                : order.createdAt
+                ? new Date(order.createdAt).toLocaleTimeString('en-IN', {
+                    hour: 'numeric',
+                    minute: '2-digit',
+                    hour12: true,
+                  })
+                : '';
+
+              return (
+                <div
+                  key={order.id}
+                  onClick={() => {
+                    if (isPending) {
+                      handleOpenModify(order);
+                    } else {
+                      setSelectedOrderDetails(order);
+                    }
+                  }}
+                  className={`p-4 space-y-1.5 hover:bg-slate-50 active:bg-slate-100 transition-colors cursor-pointer ${
+                    isInactive ? 'opacity-85' : ''
+                  }`}
+                >
+                  {/* Row 1: Time on Left, BUY / SELL on Right */}
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-slate-400 font-mono-num font-medium">{timeStr}</span>
+
+                    <span
+                      className={`font-black text-xs tracking-wider uppercase ${
+                        isBuy ? 'text-[#008f6b]' : 'text-[#EB5B5B]'
+                      }`}
+                    >
                       {order.transactionType}
-                      {hasProtection && (
-                        <span className="ml-1 text-amber-400 font-extrabold text-[11px]">
-                          + TSL/TGT
-                        </span>
-                      )}
                     </span>
-                    <span className="text-gray-400 font-medium">• {order.symbol?.includes('SENSEX') ? 'BSE' : 'NSE'}</span>
                   </div>
 
-                  <div className="text-xs text-gray-400 font-medium">
-                    {order.productType === 'NRML' ? 'Delivery' : 'Intraday'}
-                  </div>
-                </div>
+                  {/* Row 2: Instrument Name on Left, Status Dot + Qty on Right */}
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm sm:text-base font-bold text-slate-900 truncate">
+                      {formatDisplaySymbol(order.tradingSymbol) || `Contract #${order.contractId}`}
+                    </span>
 
-                {/* Middle Line: Instrument Name & Qty (0/20 or Executed/Total) */}
-                <div className="flex items-center justify-between">
-                  <div className="text-base font-bold text-white tracking-tight flex items-center gap-1.5">
-                    <span>{order.tradingSymbol || `Contract #${order.contractId}`}</span>
-                    {order.optionType && (
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {/* Status Dot: Green for Success/Executed, Amber for Open/Pending, Red for Failed/Rejected/Cancelled */}
                       <span
-                        className={`text-[9px] font-black px-1.5 py-0.2 rounded ${
-                          order.optionType === 'CE'
-                            ? 'bg-emerald-500/20 text-[#00D09C]'
-                            : 'bg-rose-500/20 text-[#EB5B5B]'
+                        className={`w-2 h-2 rounded-full shrink-0 ${
+                          isExecuted
+                            ? 'bg-[#00D09C]'
+                            : isPending
+                            ? 'bg-amber-400'
+                            : 'bg-[#EB5B5B]'
                         }`}
-                      >
-                        {order.optionType}
+                      />
+                      <span className="text-sm sm:text-base font-black text-slate-900 font-mono-num">
+                        {order.quantity}
                       </span>
-                    )}
+                    </div>
                   </div>
 
-                  <div className="text-sm font-bold font-mono-num text-white">
-                    {isPending ? (
-                      <span>0/{order.quantity}</span>
-                    ) : (
-                      <span>{order.quantity}/{order.quantity}</span>
-                    )}
+                  {/* Row 3: Product Type (Delivery/Intraday) on Left, Limit/Avg Price on Right */}
+                  <div className="flex items-center justify-between text-xs text-slate-400 font-mono-num">
+                    <span>{order.productType === 'NRML' ? 'Delivery' : 'Intraday'}</span>
+                    <span>{priceDesc}</span>
                   </div>
                 </div>
-
-                {/* Bottom Line: Market Price (LTP) & Order Price (Limit / Market) */}
-                <div className="flex items-center justify-between text-xs font-mono-num">
-                  <div className="text-gray-400">
-                    Mkt <span className="text-white font-semibold">₹{formatNumber(livePrice)}</span>
-                  </div>
-
-                  <div className="text-gray-400">
-                    {order.orderType === 'LIMIT' ? (
-                      <span>Limit ₹{formatNumber(order.price || 0)}</span>
-                    ) : (
-                      <span>Market</span>
-                    )}
-                  </div>
-                </div>
-              </div>
-            );
-          })
-        )}
+              );
+            })
+          )}
+        </div>
       </div>
 
-      {/* 2. Bottom Action Sheet for Pending Order (Exact Match to Screenshot 1) */}
-      {activeSheetOrder && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/80 backdrop-blur-sm animate-fadeIn">
-          <div className="w-full max-w-lg bg-[#0F131C] border border-[#1E2638] rounded-t-3xl sm:rounded-2xl p-5 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
-            {/* Header info box */}
-            <div className="p-4 rounded-2xl bg-[#141A26] border border-[#232D40] space-y-1.5">
-              <div className="flex items-center justify-between text-xs">
-                <div className="font-bold flex items-center gap-1.5">
-                  <span className={activeSheetOrder.transactionType === 'BUY' ? 'text-[#00D09C]' : 'text-[#EB5B5B]'}>
-                    {activeSheetOrder.transactionType}
-                    {hasSLorTarget(activeSheetOrder) && (
-                      <span className="ml-1 text-amber-400 font-extrabold text-[11px]">
-                        + TSL/TGT
-                      </span>
-                    )}
-                  </span>
-                  <span className="text-gray-400">• {activeSheetOrder.symbol?.includes('SENSEX') ? 'BSE' : 'NSE'}</span>
-                </div>
-                <span className="text-gray-400">
-                  {activeSheetOrder.productType === 'NRML' ? 'Delivery' : 'Intraday'}
-                </span>
-              </div>
 
-              <div className="flex items-center justify-between">
-                <div className="text-base font-bold text-white flex items-center gap-1">
-                  <span>{activeSheetOrder.tradingSymbol}</span>
-                  <ChevronRight className="w-4 h-4 text-gray-400" />
-                </div>
-                <div className="text-sm font-bold font-mono-num text-white">
-                  0/{activeSheetOrder.quantity}
-                </div>
-              </div>
 
-              <div className="flex items-center justify-between text-xs font-mono-num text-gray-400">
-                <span>Mkt ₹{formatNumber(getLiveLtp(activeSheetOrder))}</span>
-                <span>Limit ₹{formatNumber(activeSheetOrder.price || 0)}</span>
-              </div>
-            </div>
-
-            {/* Quick Actions List */}
-            <div className="divide-y divide-[#1E2638]/70 text-sm font-bold">
-              {/* Option 1: Buy at market price */}
-              <button
-                type="button"
-                onClick={() => handleExecuteAtMarket(activeSheetOrder)}
-                className="w-full py-3.5 flex items-center gap-3 text-white hover:text-[#00D09C] transition-colors cursor-pointer text-left"
-              >
-                <ArrowUpRight className="w-5 h-5 text-gray-400" />
-                <span>
-                  {activeSheetOrder.transactionType === 'BUY' ? 'Buy at market price' : 'Sell at market price'}
-                </span>
-              </button>
-
-              {/* Option 2: Order details */}
-              <button
-                type="button"
-                onClick={() => {
-                  const ord = activeSheetOrder;
-                  setActiveSheetOrder(null);
-                  setSelectedOrderDetails(ord);
-                }}
-                className="w-full py-3.5 flex items-center gap-3 text-white hover:text-[#00D09C] transition-colors cursor-pointer text-left"
-              >
-                <Info className="w-5 h-5 text-gray-400" />
-                <span>Order details</span>
-              </button>
-            </div>
-
-            {/* Bottom Dual Action Buttons: Cancel & Modify */}
-            <div className="grid grid-cols-2 gap-3 pt-2">
-              <button
-                type="button"
-                onClick={() => {
-                  cancelOrder(activeSheetOrder.id);
-                  setActiveSheetOrder(null);
-                }}
-                className="py-3.5 rounded-xl bg-[#141A26] hover:bg-rose-500/20 border border-[#232D40] text-rose-400 font-extrabold text-sm transition-all shadow-sm cursor-pointer text-center"
-              >
-                Cancel
-              </button>
-
-              <button
-                type="button"
-                onClick={(e) => handleOpenModify(activeSheetOrder, e)}
-                className="py-3.5 rounded-xl bg-[#00D09C] hover:bg-[#00B386] text-black font-black text-sm transition-all shadow-lg shadow-emerald-950/40 cursor-pointer text-center"
-              >
-                Modify
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 3. Groww Modify Order Modal (Exact Match to Screenshots 2 & 4) */}
+      {/* 3. Modify Order Modal */}
       {modifyingOrder && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-3 sm:p-4 animate-fadeIn">
-          <div className="w-full max-w-md bg-[#000000] border border-[#1E2638] rounded-3xl p-5 shadow-2xl space-y-4 max-h-[92vh] overflow-y-auto">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-3 sm:p-4 animate-fadeIn"
+          onClick={() => setModifyingOrder(null)}
+        >
+          <div
+            className="w-full max-w-md bg-white border border-slate-200 rounded-3xl p-5 shadow-2xl space-y-4 max-h-[92vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
             {/* Top Bar: Back arrow, Symbol, Depth, LTP */}
-            <div className="flex items-center justify-between pb-2 border-b border-[#1E2638]/60">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
               <div className="flex items-center gap-3">
                 <button
                   type="button"
                   onClick={() => setModifyingOrder(null)}
-                  className="p-1 rounded-full text-gray-300 hover:text-white"
+                  className="p-1 rounded-full text-slate-400 hover:text-slate-700 cursor-pointer"
                 >
                   <ArrowLeft className="w-5 h-5" />
                 </button>
                 <div>
-                  <h3 className="text-base font-bold text-white">
-                    {modifyingOrder.tradingSymbol}
+                  <h3 className="text-base font-bold text-slate-900">
+                    {formatDisplaySymbol(modifyingOrder.tradingSymbol)}
                   </h3>
-                  <div className="text-xs text-gray-400 font-mono-num flex items-center gap-2">
+                  <div className="text-xs text-slate-500 font-mono-num flex items-center gap-2">
                     <span>₹{formatNumber(getLiveLtp(modifyingOrder))}</span>
-                    <span className="text-gray-500">(0.00%)</span>
+                    <span className="text-slate-400">(0.00%)</span>
                   </div>
                 </div>
               </div>
 
-              <span className="text-xs font-semibold text-gray-400">Depth</span>
+              <span className="text-xs font-semibold text-slate-400">Depth</span>
             </div>
 
             {errorMsg && (
-              <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-[#EB5B5B] text-xs flex items-center gap-2">
+              <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-2">
                 <ShieldAlert className="w-4 h-4 shrink-0" />
                 <span>{errorMsg}</span>
               </div>
             )}
 
-            {/* Product Type (Delivery / Intraday) only on non-SL orders (Screenshot 4) */}
             {!hasSLorTarget(modifyingOrder) && (
               <div className="flex items-center gap-2 pt-1">
-                <span className="px-4 py-1.5 rounded-full text-xs font-bold border border-white text-white bg-white/10">
+                <span className="px-4 py-1.5 rounded-full text-xs font-bold border border-slate-300 text-slate-800 bg-slate-100">
                   {modifyingOrder.productType === 'NRML' ? 'Delivery' : 'Intraday'}
                 </span>
               </div>
@@ -572,27 +556,38 @@ export const OrderBookTable: React.FC = () => {
             {/* Quantity Row */}
             <div className="flex items-center justify-between pt-1">
               <div>
-                <div className="text-sm font-semibold text-white">Qty</div>
-                <div className="text-xs text-gray-400 font-mono-num">
+                <div className="text-sm font-semibold text-slate-900">Qty</div>
+                <div className="text-xs text-slate-500 font-mono-num">
                   {editLots} lot x {getLotSize(modifyingOrder)}
                 </div>
               </div>
 
-              <div className="flex items-center border border-[#2E3A52] rounded-xl bg-[#161C28] overflow-hidden">
+              <div className="flex items-center border border-slate-200 rounded-xl bg-slate-50 overflow-hidden focus-within:border-[#00D09C] focus-within:bg-white transition-colors">
                 <button
                   type="button"
                   onClick={() => setEditLots((l) => Math.max(1, l - 1))}
-                  className="w-9 h-9 flex items-center justify-center text-gray-300 hover:text-white border-r border-[#2E3A52] cursor-pointer"
+                  className="w-9 h-9 flex items-center justify-center text-slate-600 hover:text-slate-900 border-r border-slate-200 cursor-pointer"
                 >
                   <Minus className="w-3.5 h-3.5" />
                 </button>
-                <span className="w-14 text-center text-sm font-bold text-white font-mono-num">
-                  {editLots * getLotSize(modifyingOrder)}
-                </span>
+                <input
+                  type="number"
+                  step={getLotSize(modifyingOrder)}
+                  min={getLotSize(modifyingOrder)}
+                  value={editLots * getLotSize(modifyingOrder)}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value, 10);
+                    const lSize = getLotSize(modifyingOrder);
+                    if (!isNaN(val) && val > 0) {
+                      setEditLots(Math.max(1, Math.round(val / lSize)));
+                    }
+                  }}
+                  className="w-16 text-center text-sm font-bold text-slate-900 font-mono-num bg-transparent focus:outline-none"
+                />
                 <button
                   type="button"
                   onClick={() => setEditLots((l) => l + 1)}
-                  className="w-9 h-9 flex items-center justify-center text-gray-300 hover:text-white border-l border-[#2E3A52] cursor-pointer"
+                  className="w-9 h-9 flex items-center justify-center text-slate-600 hover:text-slate-900 border-l border-slate-200 cursor-pointer"
                 >
                   <Plus className="w-3.5 h-3.5" />
                 </button>
@@ -601,141 +596,139 @@ export const OrderBookTable: React.FC = () => {
 
             {/* Price Limit Row */}
             <div className="flex items-center justify-between pt-1">
-              <span className="text-sm font-semibold text-white flex items-center gap-1">
+              <span className="text-sm font-semibold text-slate-900 flex items-center gap-1">
                 <span>Price Limit</span>
-                <span className="text-xs text-gray-400">▾</span>
               </span>
 
-              <div className="flex flex-col items-end">
+              <div className="flex items-center border border-slate-200 rounded-xl bg-white px-3 py-1.5 focus-within:border-[#00D09C] focus-within:ring-2 focus-within:ring-[#00D09C]/20 transition-all shadow-xs">
+                <span className="text-slate-400 text-sm mr-1 font-bold">₹</span>
                 <input
-                  type="text"
-                  readOnly
-                  onClick={() => setActiveKeypadField('price')}
+                  type="number"
+                  step="0.05"
+                  min="0.05"
                   value={editPrice}
-                  className={`w-32 py-1.5 px-3 rounded-xl bg-[#161C28] text-right text-base font-extrabold font-mono-num cursor-pointer ${
-                    activeKeypadField === 'price'
-                      ? 'border-2 border-white text-white'
-                      : 'border border-[#273248] text-white'
-                  }`}
+                  onChange={(e) => {
+                    setEditPrice(e.target.value);
+                    setErrorMsg('');
+                  }}
+                  className="w-28 text-right text-base font-extrabold font-mono-num text-slate-900 bg-transparent focus:outline-none"
+                  placeholder="0.00"
                 />
-                <span className="text-[10px] text-gray-400 font-mono-num mt-0.5">
-                  {editPrice && getLiveLtp(modifyingOrder) > 0 ? (
-                    (() => {
-                      const p = parseFloat(editPrice);
-                      const ltp = getLiveLtp(modifyingOrder);
-                      const diff = (((p - ltp) / ltp) * 100).toFixed(2);
-                      return `${parseFloat(diff) >= 0 ? '+' : ''}${diff}% from market`;
-                    })()
-                  ) : null}
-                </span>
               </div>
             </div>
 
-            {/* IF ORDER HAS STOP LOSS (Screenshot 2): Render Stop Loss & Target Sections */}
+            {/* IF ORDER HAS STOP LOSS: Render Stop Loss & Target Sections */}
             {hasSLorTarget(modifyingOrder) ? (() => {
-              const pVal = parseFloat(editPrice) || getLiveLtp(modifyingOrder);
-              const slVal = editTriggerPrice !== '' ? parseFloat(editTriggerPrice) : undefined;
-              const tgtVal = editTargetPrice !== '' ? parseFloat(editTargetPrice) : undefined;
+              const liveLtp = getLiveLtp(modifyingOrder);
+              const matchedPos = positionsSummary?.positions.find(
+                (p) => p.tradingSymbol === modifyingOrder.tradingSymbol || p.contractId === modifyingOrder.contractId
+              );
+              const isLongTrade = matchedPos
+                ? (matchedPos.netQuantity > 0 || (matchedPos.netQuantity === 0 && modifyingOrder.transactionType === 'BUY'))
+                : (modifyingOrder.transactionType === 'BUY' || (modifyingOrder.triggerPrice !== undefined && modifyingOrder.triggerPrice < liveLtp));
 
-              const liveSlErr =
-                slVal !== undefined && !isNaN(slVal) && pVal > 0 && slVal >= pVal
-                  ? `Stop Loss (₹${slVal.toFixed(2)}) must be LESS than buy price ₹${formatNumber(pVal)}`
-                  : '';
+              const numSl = parseFloat(editTriggerPrice);
+              const numTgt = parseFloat(editTargetPrice);
 
-              const liveTgtErr =
-                tgtVal !== undefined && !isNaN(tgtVal) && pVal > 0 && tgtVal <= pVal
-                  ? `Target (₹${tgtVal.toFixed(2)}) must be GREATER than buy price ₹${formatNumber(pVal)}`
-                  : '';
+              let liveSlErr = '';
+              if (!isNaN(numSl) && numSl > 0 && liveLtp > 0) {
+                if (isLongTrade) {
+                  if (numSl >= liveLtp) liveSlErr = `SL (₹${numSl}) must be < LTP (₹${formatNumber(liveLtp)})`;
+                  else if (!isNaN(numTgt) && numTgt > 0 && numSl >= numTgt) liveSlErr = `SL (₹${numSl}) must be < Target (₹${numTgt})`;
+                } else {
+                  if (numSl <= liveLtp) liveSlErr = `SL (₹${numSl}) must be > LTP (₹${formatNumber(liveLtp)})`;
+                  else if (!isNaN(numTgt) && numTgt > 0 && numSl <= numTgt) liveSlErr = `SL (₹${numSl}) must be > Target (₹${numTgt})`;
+                }
+              }
+
+              let liveTgtErr = '';
+              if (!isNaN(numTgt) && numTgt > 0 && liveLtp > 0) {
+                if (isLongTrade) {
+                  if (numTgt <= liveLtp) liveTgtErr = `Target (₹${numTgt}) must be > LTP (₹${formatNumber(liveLtp)})`;
+                  else if (!isNaN(numSl) && numSl > 0 && numTgt <= numSl) liveTgtErr = `Target (₹${numTgt}) must be > SL (₹${numSl})`;
+                } else {
+                  if (numTgt >= liveLtp) liveTgtErr = `Target (₹${numTgt}) must be < LTP (₹${formatNumber(liveLtp)})`;
+                  else if (!isNaN(numSl) && numSl > 0 && numTgt >= numSl) liveTgtErr = `Target (₹${numTgt}) must be < SL (₹${numSl})`;
+                }
+              }
 
               return (
-                <div className="space-y-3 pt-2 border-t border-[#1E2638]/70">
-                  {/* Stop Loss Trigger Row */}
-                  <div className={`p-2.5 rounded-xl transition-colors ${liveSlErr ? 'bg-rose-500/10 border border-rose-500/40' : ''}`}>
+                <div className="p-3 bg-slate-50/80 rounded-2xl border border-slate-200 space-y-3">
+                  <div className={`p-2.5 rounded-xl transition-colors ${liveSlErr ? 'bg-rose-50 border border-rose-200' : ''}`}>
                     <div className="flex items-start justify-between">
-                      <div>
-                        <span className="text-sm font-semibold text-white">Stoploss trigger</span>
-                        {/* Trailing SL Checkbox */}
-                        <div className="flex items-center gap-2 mt-2">
-                          <input
-                            type="checkbox"
-                            id="trailCheck"
-                            checked={isTrailEnabled}
-                            onChange={(e) => setIsTrailEnabled(e.target.checked)}
-                            className="w-4 h-4 rounded text-[#00D09C] bg-[#161C28] border-gray-600 focus:ring-0"
-                          />
-                          <label htmlFor="trailCheck" className="text-xs text-[#00D09C] font-semibold cursor-pointer">
-                            Trail every +₹{editTrailingStopLoss}
-                          </label>
-                        </div>
-                      </div>
-
-                      <div className="flex flex-col items-end">
+                      <span className="text-sm font-semibold text-slate-900">Stop loss trigger</span>
+                      <div className="flex items-center border border-slate-200 rounded-xl bg-white px-3 py-1.5 focus-within:border-amber-500 focus-within:ring-2 focus-within:ring-amber-500/20 transition-all shadow-xs">
+                        <span className="text-slate-400 text-sm mr-1 font-bold">₹</span>
                         <input
-                          type="text"
-                          readOnly
-                          onClick={() => setActiveKeypadField('sl')}
+                          type="number"
+                          step="0.05"
+                          min="0.05"
                           value={editTriggerPrice}
-                          className={`w-32 py-1.5 px-3 rounded-xl bg-[#161C28] text-right text-base font-extrabold font-mono-num cursor-pointer transition-all ${
-                            liveSlErr
-                              ? 'border-2 border-rose-500 text-rose-400'
-                              : activeKeypadField === 'sl'
-                              ? 'border-2 border-amber-400 text-amber-400'
-                              : 'border border-[#273248] text-amber-400'
-                          }`}
+                          onChange={(e) => {
+                            setEditTriggerPrice(e.target.value);
+                            setErrorMsg('');
+                          }}
+                          className="w-28 text-right text-base font-extrabold font-mono-num text-amber-700 bg-transparent focus:outline-none"
+                          placeholder="0.00"
                         />
-                        <span className="text-[10px] text-gray-400 font-mono-num mt-0.5">
-                          {editTriggerPrice && getLiveLtp(modifyingOrder) > 0 ? (
-                            (() => {
-                              const sl = parseFloat(editTriggerPrice);
-                              const ltp = getLiveLtp(modifyingOrder);
-                              const diff = (((sl - ltp) / ltp) * 100).toFixed(2);
-                              return `${diff}% from market`;
-                            })()
-                          ) : null}
-                        </span>
                       </div>
                     </div>
                     {liveSlErr && (
-                      <div className="text-[11px] font-bold text-rose-400 mt-1">
+                      <div className="text-[11px] font-bold text-rose-600 mt-1">
                         ❌ {liveSlErr}
                       </div>
                     )}
                   </div>
 
-                  {/* Target Trigger Row */}
-                  <div className={`p-2.5 rounded-xl transition-colors border-t border-[#1E2638]/70 ${liveTgtErr ? 'bg-rose-500/10 border border-rose-500/40' : ''}`}>
+                  <div className={`p-2.5 rounded-xl transition-colors border-t border-slate-100 ${liveTgtErr ? 'bg-rose-50 border border-rose-200' : ''}`}>
                     <div className="flex items-start justify-between">
-                      <span className="text-sm font-semibold text-white">Target trigger</span>
-
-                      <div className="flex flex-col items-end">
+                      <span className="text-sm font-semibold text-slate-900">Target trigger</span>
+                      <div className="flex items-center border border-slate-200 rounded-xl bg-white px-3 py-1.5 focus-within:border-[#00D09C] focus-within:ring-2 focus-within:ring-[#00D09C]/20 transition-all shadow-xs">
+                        <span className="text-slate-400 text-sm mr-1 font-bold">₹</span>
                         <input
-                          type="text"
-                          readOnly
-                          onClick={() => setActiveKeypadField('target')}
+                          type="number"
+                          step="0.05"
+                          min="0.05"
                           value={editTargetPrice}
-                          className={`w-32 py-1.5 px-3 rounded-xl bg-[#161C28] text-right text-base font-extrabold font-mono-num cursor-pointer transition-all ${
-                            liveTgtErr
-                              ? 'border-2 border-rose-500 text-rose-400'
-                              : activeKeypadField === 'target'
-                              ? 'border-2 border-emerald-400 text-emerald-400'
-                              : 'border border-[#273248] text-emerald-400'
-                          }`}
+                          onChange={(e) => {
+                            setEditTargetPrice(e.target.value);
+                            setErrorMsg('');
+                          }}
+                          className="w-28 text-right text-base font-extrabold font-mono-num text-[#008f6b] bg-transparent focus:outline-none"
+                          placeholder="0.00"
                         />
-                        <span className="text-[10px] text-gray-400 font-mono-num mt-0.5">
-                          {editTargetPrice && getLiveLtp(modifyingOrder) > 0 ? (
-                            (() => {
-                              const tgt = parseFloat(editTargetPrice);
-                              const ltp = getLiveLtp(modifyingOrder);
-                              const diff = (((tgt - ltp) / ltp) * 100).toFixed(2);
-                              return `+${diff}% from market`;
-                            })()
-                          ) : null}
-                        </span>
                       </div>
                     </div>
                     {liveTgtErr && (
-                      <div className="text-[11px] font-bold text-rose-400 mt-1">
+                      <div className="text-[11px] font-bold text-rose-600 mt-1">
                         ❌ {liveTgtErr}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center justify-between pt-1 border-t border-slate-200/80">
+                    <label className="flex items-center gap-2 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={isTrailEnabled}
+                        onChange={(e) => setIsTrailEnabled(e.target.checked)}
+                        className="rounded border-slate-300 text-[#008f6b] focus:ring-0 cursor-pointer"
+                      />
+                      <span className="text-xs font-semibold text-slate-700">Trail Stop Loss</span>
+                    </label>
+
+                    {isTrailEnabled && (
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs text-slate-400">₹</span>
+                        <input
+                          type="number"
+                          min="0.5"
+                          step="0.5"
+                          value={editTrailingStopLoss}
+                          onChange={(e) => setEditTrailingStopLoss(e.target.value)}
+                          className="w-16 py-1 px-2 rounded-lg bg-white border border-slate-200 text-right text-xs font-bold font-mono-num text-slate-900 focus:outline-none focus:border-[#00D09C]"
+                          placeholder="0.00"
+                        />
                       </div>
                     )}
                   </div>
@@ -743,39 +736,32 @@ export const OrderBookTable: React.FC = () => {
               );
             })() : null}
 
-            {/* Explanatory subtext */}
-            <div className="text-xs text-gray-400 text-center">
+            <div className="text-xs text-slate-500 text-center">
               Order will be executed at {editPrice || '0.00'} or lower price.
             </div>
 
-            {/* Wallet Balance Strip */}
-            <div className="flex justify-between items-center text-xs text-gray-400 pt-1">
-              <span>Balance: <span className="text-white font-bold">{formatINR(wallet?.availableMargin ?? 1000000)}</span></span>
-              <Info className="w-3.5 h-3.5 text-gray-500" />
-            </div>
+            <div className="grid grid-cols-2 gap-2.5 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  const ord = modifyingOrder;
+                  setModifyingOrder(null);
+                  setOrderToCancel(ord);
+                }}
+                disabled={isSubmitting}
+                className="py-3.5 rounded-xl bg-slate-100 hover:bg-rose-50 border border-slate-200 text-rose-600 font-extrabold text-xs sm:text-sm transition-all shadow-xs cursor-pointer text-center disabled:opacity-50"
+              >
+                Cancel Order
+              </button>
 
-            {/* Modify Action Button */}
-            <button
-              type="button"
-              onClick={handleSaveModify}
-              disabled={isSubmitting}
-              className="w-full py-3.5 rounded-xl bg-[#00D09C] hover:bg-[#00B386] text-black font-black text-sm transition-all shadow-lg shadow-emerald-950/40 cursor-pointer disabled:opacity-50"
-            >
-              {isSubmitting ? 'Modifying...' : `Modify ${modifyingOrder.transactionType === 'BUY' ? 'buy' : 'sell'}`}
-            </button>
-
-            {/* Onscreen Numeric Keypad */}
-            <div className="grid grid-cols-3 gap-2 pt-2 border-t border-[#1E2638]">
-              {['1', '2', '3', '4', '5', '6', '7', '8', '9', '.', '0', 'BACKSPACE'].map((k) => (
-                <button
-                  key={k}
-                  type="button"
-                  onClick={() => handleKeypadPress(k)}
-                  className="py-3 rounded-xl bg-[#121620] hover:bg-[#1C2333] active:bg-[#2A344C] text-white font-bold text-lg transition-colors flex items-center justify-center cursor-pointer"
-                >
-                  {k === 'BACKSPACE' ? <X className="w-5 h-5 text-gray-400" /> : k}
-                </button>
-              ))}
+              <button
+                type="button"
+                onClick={handleSaveModify}
+                disabled={isSubmitting}
+                className="py-3.5 rounded-xl bg-[#00D09C] hover:bg-[#00B386] text-black font-black text-xs sm:text-sm transition-all shadow-sm cursor-pointer disabled:opacity-50"
+              >
+                {isSubmitting ? 'Saving...' : `Modify ${modifyingOrder.transactionType === 'BUY' ? 'Buy' : 'Sell'}`}
+              </button>
             </div>
           </div>
         </div>
@@ -783,65 +769,215 @@ export const OrderBookTable: React.FC = () => {
 
       {/* 4. Full Order Details Modal */}
       {selectedOrderDetails && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fadeIn">
-          <div className="w-full max-w-lg rounded-2xl bg-groww-card border border-groww-border p-5 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
-            <div className="flex items-start justify-between pb-3 border-b border-groww-border">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-fadeIn"
+          onClick={() => setSelectedOrderDetails(null)}
+        >
+          <div
+            className="w-full max-w-lg rounded-2xl bg-white border border-slate-200 p-5 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between pb-3 border-b border-slate-100">
               <div>
-                <h3 className="text-lg font-black text-white">
-                  {selectedOrderDetails.tradingSymbol}
+                <h3 className="text-lg font-black text-slate-900">
+                  {formatDisplaySymbol(selectedOrderDetails.tradingSymbol)}
                 </h3>
-                <div className="text-xs text-gray-400 mt-0.5">
+                <div className="text-xs text-slate-400 mt-0.5">
                   Order ID: {selectedOrderDetails.id}
                 </div>
               </div>
               <button
                 type="button"
                 onClick={() => setSelectedOrderDetails(null)}
-                className="p-1 text-gray-400 hover:text-white"
+                className="p-1 text-slate-400 hover:text-slate-700 cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="grid grid-cols-2 gap-2 text-xs bg-groww-surface p-3 rounded-xl border border-groww-border font-mono-num">
+            <div className="grid grid-cols-2 gap-2 text-xs bg-slate-50 p-3 rounded-xl border border-slate-200 font-mono-num">
               <div className="space-y-2">
                 <div className="flex justify-between">
-                  <span className="text-gray-400 font-sans">Type:</span>
-                  <span className="text-white font-bold">{selectedOrderDetails.transactionType}</span>
+                  <span className="text-slate-500 font-sans">Type:</span>
+                  <span className="text-slate-900 font-bold">{selectedOrderDetails.transactionType}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-gray-400 font-sans">Order Price:</span>
-                  <span className="text-white font-bold">₹{formatNumber(selectedOrderDetails.price || 0)}</span>
+                  <span className="text-slate-500 font-sans">Order Price:</span>
+                  <span className="text-slate-900 font-bold">₹{formatNumber(selectedOrderDetails.price || 0)}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-gray-400 font-sans">Quantity:</span>
-                  <span className="text-white font-bold">{selectedOrderDetails.quantity}</span>
+                  <span className="text-slate-500 font-sans">Quantity:</span>
+                  <span className="text-slate-900 font-bold">{selectedOrderDetails.quantity}</span>
                 </div>
               </div>
 
-              <div className="space-y-2 pl-3 border-l border-groww-border/60">
+              <div className="space-y-2 pl-3 border-l border-slate-200">
                 <div className="flex justify-between">
-                  <span className="text-gray-400 font-sans">Status:</span>
-                  <span className="text-[#00D09C] font-bold">{selectedOrderDetails.status}</span>
+                  <span className="text-slate-500 font-sans">Status:</span>
+                  <span className={`font-bold ${
+                    selectedOrderDetails.status === 'EXECUTED'
+                      ? 'text-[#008f6b]'
+                      : selectedOrderDetails.status === 'REJECTED'
+                      ? 'text-rose-600'
+                      : selectedOrderDetails.status === 'PENDING'
+                      ? 'text-sky-600'
+                      : 'text-slate-600'
+                  }`}>
+                    {selectedOrderDetails.status}
+                  </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-gray-400 font-sans">SL Trigger:</span>
-                  <span className="text-amber-400 font-bold">{selectedOrderDetails.triggerPrice ? `₹${selectedOrderDetails.triggerPrice}` : '-'}</span>
+                  <span className="text-slate-500 font-sans">SL Trigger:</span>
+                  <span className="text-amber-700 font-bold">{selectedOrderDetails.triggerPrice ? `₹${selectedOrderDetails.triggerPrice}` : '-'}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-gray-400 font-sans">Target:</span>
-                  <span className="text-emerald-400 font-bold">{selectedOrderDetails.targetPrice ? `₹${selectedOrderDetails.targetPrice}` : '-'}</span>
+                  <span className="text-slate-500 font-sans">Target:</span>
+                  <span className="text-[#008f6b] font-bold">{selectedOrderDetails.targetPrice ? `₹${selectedOrderDetails.targetPrice}` : '-'}</span>
                 </div>
               </div>
             </div>
 
-            <div className="pt-2 border-t border-groww-border">
+            {selectedOrderDetails.status === 'REJECTED' && selectedOrderDetails.rejectionReason && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-2">
+                <ShieldAlert className="w-4 h-4 shrink-0" />
+                <span>{selectedOrderDetails.rejectionReason}</span>
+              </div>
+            )}
+
+            {(selectedOrderDetails.status === 'REJECTED' || selectedOrderDetails.status === 'CANCELLED') && (
+              <div className="pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => handleRetryOrder(selectedOrderDetails)}
+                  className="w-full py-3 rounded-xl bg-[#00D09C] hover:bg-[#00B386] text-black font-black text-sm transition-all cursor-pointer shadow-xs"
+                >
+                  Retry Order (Place Again)
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 5. Cancel Single Order Confirmation Modal */}
+      {orderToCancel && (
+        <div
+          className="fixed inset-0 z-60 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-fadeIn"
+          onClick={() => setOrderToCancel(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-3xl bg-white border border-slate-200 p-5 shadow-2xl space-y-4 animate-slideUp"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-rose-50 border border-rose-100 flex items-center justify-center text-rose-600 shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Cancel Order?</h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Are you sure you want to cancel this pending {orderToCancel.transactionType} order?
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200 text-xs font-mono-num space-y-1.5">
+              <div className="flex justify-between text-slate-600">
+                <span>Contract:</span>
+                <strong className="text-slate-900">{formatDisplaySymbol(orderToCancel.tradingSymbol)}</strong>
+              </div>
+              <div className="flex justify-between text-slate-600">
+                <span>Quantity:</span>
+                <strong className="text-slate-900">{orderToCancel.quantity} Qty</strong>
+              </div>
+              <div className="flex justify-between text-slate-600">
+                <span>Limit Price:</span>
+                <strong className="text-slate-900">₹{formatNumber(orderToCancel.price || 0)}</strong>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 pt-1">
               <button
                 type="button"
-                onClick={() => handleRetryOrder(selectedOrderDetails)}
-                className="w-full py-3 rounded-xl bg-[#00D09C] hover:bg-[#00B386] text-black font-black text-sm transition-all cursor-pointer"
+                onClick={() => setOrderToCancel(null)}
+                className="flex-1 py-3 rounded-2xl bg-slate-100 text-slate-700 text-xs font-bold hover:bg-slate-200 cursor-pointer transition-colors"
               >
-                Retry Order (Place Again)
+                No, Keep
+              </button>
+              <button
+                type="button"
+                disabled={isCancelling}
+                onClick={async () => {
+                  setIsCancelling(true);
+                  try {
+                    await cancelOrder(orderToCancel.id);
+                    toast.info('Order Cancelled', `Order #${orderToCancel.id} has been cancelled.`);
+                    setOrderToCancel(null);
+                    setActiveSheetOrder(null);
+                  } catch (err: any) {
+                    toast.error('Cancel Failed', err?.message || 'Failed to cancel order.');
+                  } finally {
+                    setIsCancelling(false);
+                  }
+                }}
+                className="flex-1 py-3 rounded-2xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-black transition-all shadow-md cursor-pointer disabled:opacity-50"
+              >
+                {isCancelling ? 'Cancelling...' : 'Yes, Cancel'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 6. Cancel All Orders Confirmation Modal */}
+      {showCancelAllConfirm && (
+        <div
+          className="fixed inset-0 z-60 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 animate-fadeIn"
+          onClick={() => setShowCancelAllConfirm(false)}
+        >
+          <div
+            className="w-full max-w-sm rounded-3xl bg-white border border-slate-200 p-5 shadow-2xl space-y-4 animate-slideUp"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-rose-50 border border-rose-100 flex items-center justify-center text-rose-600 shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Cancel All Orders?</h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Are you sure you want to cancel all {pendingOrdersCount} pending orders?
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setShowCancelAllConfirm(false)}
+                className="flex-1 py-3 rounded-2xl bg-slate-100 text-slate-700 text-xs font-bold hover:bg-slate-200 cursor-pointer transition-colors"
+              >
+                No, Keep
+              </button>
+              <button
+                type="button"
+                disabled={isCancelling}
+                onClick={async () => {
+                  setIsCancelling(true);
+                  try {
+                    await cancelAllOrders();
+                    toast.info('Orders Cancelled', `Cancelled all ${pendingOrdersCount} pending orders.`);
+                    setShowCancelAllConfirm(false);
+                    setActiveSheetOrder(null);
+                  } catch (err: any) {
+                    toast.error('Cancel Failed', err?.message || 'Failed to cancel orders.');
+                  } finally {
+                    setIsCancelling(false);
+                  }
+                }}
+                className="flex-1 py-3 rounded-2xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-black transition-all shadow-md cursor-pointer disabled:opacity-50"
+              >
+                {isCancelling ? 'Cancelling...' : 'Yes, Cancel All'}
               </button>
             </div>
           </div>

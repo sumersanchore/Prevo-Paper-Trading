@@ -1,22 +1,12 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { PostgresProvider } from '../postgres.provider.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { autoMigrateDatabase } from '../auto-migrate.js';
 
 async function runMigration() {
   const db = PostgresProvider.getInstance();
-  const sqlPath = path.resolve(__dirname, '../../sql/001_initial_schema.sql');
-  
-  console.info(`[Migrate] Reading schema from: ${sqlPath}`);
-  const sql = fs.readFileSync(sqlPath, 'utf-8');
-
   try {
-    console.info('[Migrate] Applying database schema migration...');
-    await db.query(sql);
-    console.info('[Migrate] Database schema applied successfully!');
+    console.info('[Migrate] Running database migrations...');
+    await autoMigrateDatabase(db);
+    console.info('[Migrate] All database tables and migrations applied successfully!');
   } catch (error) {
     console.error('[Migrate] Migration failed:', error);
     process.exit(1);

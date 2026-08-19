@@ -21,6 +21,11 @@ export interface IOrderRow {
   executed_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
+  // Joined from options_contracts
+  symbol?: string;
+  trading_symbol?: string;
+  strike_price?: string | number;
+  option_type?: 'CE' | 'PE';
 }
 
 export class OrdersRepository {
@@ -44,6 +49,10 @@ export class OrdersRepository {
       status: row.status,
       rejectionReason: row.rejection_reason ?? undefined,
       executedAt: row.executed_at ? new Date(row.executed_at).toISOString() : undefined,
+      tradingSymbol: row.trading_symbol ?? undefined,
+      symbol: row.symbol ?? undefined,
+      strikePrice: row.strike_price ? Number(row.strike_price) : undefined,
+      optionType: row.option_type ?? undefined,
       createdAt: new Date(row.created_at).toISOString(),
       updatedAt: new Date(row.updated_at).toISOString(),
     };
@@ -67,15 +76,68 @@ export class OrdersRepository {
       status: 'PENDING' | 'EXECUTED' | 'CANCELLED' | 'REJECTED';
       rejectionReason?: string;
       executedAt?: string;
+      tradingSymbol?: string;
+      symbol?: string;
+      strikePrice?: number;
+      optionType?: 'CE' | 'PE';
     }
   ): Promise<OptionOrderEntity> {
     const clientOrderId = order.clientOrderId ?? uuidv4();
 
-    const orderEntity: OptionOrderEntity = {
+    const insertSql = `
+      INSERT INTO option_orders (
+        client_order_id, user_id, contract_id, order_type, transaction_type,
+        product_type, quantity, price, trigger_price, target_price, trailing_stop_loss,
+        average_price, status, rejection_reason, executed_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+      RETURNING id, client_order_id, user_id, contract_id, order_type, transaction_type,
+                product_type, quantity, price, trigger_price, target_price, trailing_stop_loss,
+                average_price, status, rejection_reason, executed_at, created_at, updated_at`;
+
+    const params = [
+      clientOrderId,
+      order.userId,
+      order.contractId,
+      order.orderType,
+      order.transactionType,
+      order.productType,
+      order.quantity,
+      order.price ?? null,
+      order.triggerPrice ?? null,
+      order.targetPrice ?? null,
+      order.trailingStopLoss ?? null,
+      order.averagePrice ?? null,
+      order.status,
+      order.rejectionReason ?? null,
+      order.executedAt ? new Date(order.executedAt) : null,
+    ];
+
+    try {
+      const result = client
+        ? await client.query<IOrderRow>(insertSql, params)
+        : await db.query<IOrderRow>(insertSql, params);
+
+      if (result.rows.length > 0) {
+        const dbEntity = this.mapRowToEntity(result.rows[0]!);
+        if (!dbEntity.tradingSymbol && order.tradingSymbol) {
+          dbEntity.tradingSymbol = order.tradingSymbol;
+          dbEntity.symbol = order.symbol;
+          dbEntity.strikePrice = order.strikePrice;
+          dbEntity.optionType = order.optionType;
+        }
+        OrdersRepository.memOrders.set(dbEntity.id, dbEntity);
+        return dbEntity;
+      }
+    } catch {
+      // Fallback to in-memory store
+    }
+
+    const memEntity: OptionOrderEntity = {
       id: String(Date.now()) + Math.random().toString().slice(2, 6),
       clientOrderId,
-      userId: order.userId,
-      contractId: order.contractId,
+      userId: String(order.userId),
+      contractId: String(order.contractId),
       orderType: order.orderType,
       transactionType: order.transactionType,
       productType: order.productType,
@@ -88,91 +150,53 @@ export class OrdersRepository {
       status: order.status,
       rejectionReason: order.rejectionReason,
       executedAt: order.executedAt,
+      tradingSymbol: order.tradingSymbol,
+      symbol: order.symbol,
+      strikePrice: order.strikePrice,
+      optionType: order.optionType,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
 
-    OrdersRepository.memOrders.set(orderEntity.id, orderEntity);
-
-    try {
-      if (client) {
-        const result = await client.query<IOrderRow>(
-          `INSERT INTO option_orders (
-             client_order_id, user_id, contract_id, order_type, transaction_type,
-             product_type, quantity, price, trigger_price, target_price, trailing_stop_loss, average_price, status,
-             rejection_reason, executed_at
-           )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-           RETURNING id, client_order_id, user_id, contract_id, order_type, transaction_type,
-                     product_type, quantity, price, trigger_price, target_price, trailing_stop_loss, average_price, status,
-                     rejection_reason, executed_at, created_at, updated_at`,
-          [
-            clientOrderId,
-            order.userId,
-            order.contractId,
-            order.orderType,
-            order.transactionType,
-            order.productType,
-            order.quantity,
-            order.price ?? null,
-            order.triggerPrice ?? null,
-            order.targetPrice ?? null,
-            order.trailingStopLoss ?? null,
-            order.averagePrice ?? null,
-            order.status,
-            order.rejectionReason ?? null,
-            order.executedAt ? new Date(order.executedAt) : null,
-          ]
-        );
-
-        if (result.rows.length > 0) {
-          const dbEntity = this.mapRowToEntity(result.rows[0]!);
-          OrdersRepository.memOrders.set(dbEntity.id, dbEntity);
-          return dbEntity;
-        }
-      }
-    } catch {
-      // Fallback
-    }
-
-    return orderEntity;
+    OrdersRepository.memOrders.set(memEntity.id, memEntity);
+    return memEntity;
   }
 
   public async getOrdersByUserId(userId: string, status?: string): Promise<OptionOrderEntity[]> {
     const orderMap = new Map<string, OptionOrderEntity>();
 
-    // 1. Load from in-memory store
+    // 1. Seed with in-memory orders for this user
     for (const ord of OrdersRepository.memOrders.values()) {
-      if (ord.userId === userId && (!status || ord.status === status)) {
+      if (String(ord.userId) === String(userId) && (!status || ord.status === status)) {
         orderMap.set(ord.id, ord);
       }
     }
 
-    // 2. Query database and merge
+    // 2. Query database with LEFT JOIN to options_contracts and merge
     try {
       let query = `
-        SELECT id, client_order_id, user_id, contract_id, order_type, transaction_type,
-               product_type, quantity, price, trigger_price, target_price, trailing_stop_loss, average_price, status,
-               rejection_reason, executed_at, created_at, updated_at
-        FROM option_orders
-        WHERE user_id = $1
+        SELECT o.id, o.client_order_id, o.user_id, o.contract_id, o.order_type, o.transaction_type,
+               o.product_type, o.quantity, o.price, o.trigger_price, o.target_price, o.trailing_stop_loss,
+               o.average_price, o.status, o.rejection_reason, o.executed_at, o.created_at, o.updated_at,
+               c.symbol, c.trading_symbol, c.strike_price, c.option_type
+        FROM option_orders o
+        LEFT JOIN options_contracts c ON o.contract_id = c.id
+        WHERE o.user_id = $1
       `;
       const params: any[] = [userId];
 
       if (status) {
-        query += ` AND status = $2`;
+        query += ` AND o.status = $2`;
         params.push(status);
       }
 
-      query += ` ORDER BY created_at DESC`;
+      query += ` ORDER BY o.created_at DESC`;
 
       const result = await db.query<IOrderRow>(query, params);
-      if (result.rows.length > 0) {
-        for (const r of result.rows) {
-          const entity = this.mapRowToEntity(r);
-          orderMap.set(entity.id, entity);
-          OrdersRepository.memOrders.set(entity.id, entity);
-        }
+      for (const r of result.rows) {
+        const entity = this.mapRowToEntity(r);
+        orderMap.set(entity.id, entity);
+        OrdersRepository.memOrders.set(entity.id, entity);
       }
     } catch {
       // Fallback
@@ -186,16 +210,20 @@ export class OrdersRepository {
   public async getOrderById(id: string): Promise<OptionOrderEntity | null> {
     try {
       const result = await db.query<IOrderRow>(
-        `SELECT id, client_order_id, user_id, contract_id, order_type, transaction_type,
-                product_type, quantity, price, trigger_price, target_price, trailing_stop_loss, average_price, status,
-                rejection_reason, executed_at, created_at, updated_at
-         FROM option_orders
-         WHERE id = $1`,
+        `SELECT o.id, o.client_order_id, o.user_id, o.contract_id, o.order_type, o.transaction_type,
+                o.product_type, o.quantity, o.price, o.trigger_price, o.target_price, o.trailing_stop_loss,
+                o.average_price, o.status, o.rejection_reason, o.executed_at, o.created_at, o.updated_at,
+                c.symbol, c.trading_symbol, c.strike_price, c.option_type
+         FROM option_orders o
+         LEFT JOIN options_contracts c ON o.contract_id = c.id
+         WHERE o.id = $1`,
         [id]
       );
 
       if (result.rows.length > 0) {
-        return this.mapRowToEntity(result.rows[0]!);
+        const entity = this.mapRowToEntity(result.rows[0]!);
+        OrdersRepository.memOrders.set(entity.id, entity);
+        return entity;
       }
     } catch {
       // Fallback
@@ -219,46 +247,55 @@ export class OrdersRepository {
       executedAt?: string;
     }
   ): Promise<OptionOrderEntity | null> {
-    try {
-      if (client) {
-        const result = await client.query<IOrderRow>(
-          `UPDATE option_orders
-           SET price = COALESCE($2, price),
-               trigger_price = COALESCE($3, trigger_price),
-               target_price = COALESCE($4, target_price),
-               trailing_stop_loss = COALESCE($5, trailing_stop_loss),
-               quantity = COALESCE($6, quantity),
-               status = COALESCE($7, status),
-               average_price = COALESCE($8, average_price),
-               rejection_reason = COALESCE($9, rejection_reason),
-               executed_at = COALESCE($10, executed_at),
-               updated_at = NOW()
-           WHERE id = $1
-           RETURNING id, client_order_id, user_id, contract_id, order_type, transaction_type,
-                     product_type, quantity, price, trigger_price, target_price, trailing_stop_loss, average_price, status,
-                     rejection_reason, executed_at, created_at, updated_at`,
-          [
-            orderId,
-            updates.price ?? null,
-            updates.triggerPrice ?? null,
-            updates.targetPrice ?? null,
-            updates.trailingStopLoss ?? null,
-            updates.quantity ?? null,
-            updates.status ?? null,
-            updates.averagePrice ?? null,
-            updates.rejectionReason ?? null,
-            updates.executedAt ? new Date(updates.executedAt) : null,
-          ]
-        );
+    const updateSql = `
+      UPDATE option_orders
+      SET price             = COALESCE($2, price),
+          trigger_price     = COALESCE($3, trigger_price),
+          target_price      = COALESCE($4, target_price),
+          trailing_stop_loss = COALESCE($5, trailing_stop_loss),
+          quantity          = COALESCE($6, quantity),
+          status            = COALESCE($7, status),
+          average_price     = COALESCE($8, average_price),
+          rejection_reason  = COALESCE($9, rejection_reason),
+          executed_at       = COALESCE($10, executed_at),
+          updated_at        = NOW()
+      WHERE id = $1
+      RETURNING id, client_order_id, user_id, contract_id, order_type, transaction_type,
+                product_type, quantity, price, trigger_price, target_price, trailing_stop_loss,
+                average_price, status, rejection_reason, executed_at, created_at, updated_at`;
 
-        if (result.rows.length > 0) {
-          const entity = this.mapRowToEntity(result.rows[0]!);
-          OrdersRepository.memOrders.set(entity.id, entity);
-          return entity;
+    const params = [
+      orderId,
+      updates.price ?? null,
+      updates.triggerPrice ?? null,
+      updates.targetPrice ?? null,
+      updates.trailingStopLoss ?? null,
+      updates.quantity ?? null,
+      updates.status ?? null,
+      updates.averagePrice ?? null,
+      updates.rejectionReason ?? null,
+      updates.executedAt ? new Date(updates.executedAt) : null,
+    ];
+
+    try {
+      const result = client
+        ? await client.query<IOrderRow>(updateSql, params)
+        : await db.query<IOrderRow>(updateSql, params);
+
+      if (result.rows.length > 0) {
+        const entity = this.mapRowToEntity(result.rows[0]!);
+        const prev = OrdersRepository.memOrders.get(orderId);
+        if (prev) {
+          entity.tradingSymbol = prev.tradingSymbol;
+          entity.symbol = prev.symbol;
+          entity.strikePrice = prev.strikePrice;
+          entity.optionType = prev.optionType;
         }
+        OrdersRepository.memOrders.set(entity.id, entity);
+        return entity;
       }
     } catch {
-      // Fallback
+      // Fallback to in-memory update
     }
 
     const existing = OrdersRepository.memOrders.get(orderId);
@@ -284,12 +321,14 @@ export class OrdersRepository {
   public async getAllPendingOrders(): Promise<OptionOrderEntity[]> {
     try {
       const result = await db.query<IOrderRow>(
-        `SELECT id, client_order_id, user_id, contract_id, order_type, transaction_type,
-                product_type, quantity, price, trigger_price, target_price, trailing_stop_loss, average_price, status,
-                rejection_reason, executed_at, created_at, updated_at
-         FROM option_orders
-         WHERE status = 'PENDING'
-         ORDER BY created_at ASC`
+        `SELECT o.id, o.client_order_id, o.user_id, o.contract_id, o.order_type, o.transaction_type,
+                o.product_type, o.quantity, o.price, o.trigger_price, o.target_price, o.trailing_stop_loss,
+                o.average_price, o.status, o.rejection_reason, o.executed_at, o.created_at, o.updated_at,
+                c.symbol, c.trading_symbol, c.strike_price, c.option_type
+         FROM option_orders o
+         LEFT JOIN options_contracts c ON o.contract_id = c.id
+         WHERE o.status = 'PENDING'
+         ORDER BY o.created_at ASC`
       );
 
       if (result.rows.length > 0) {
@@ -303,26 +342,33 @@ export class OrdersRepository {
   }
 
   public async cancelAllPendingOrders(client: PoolClient | null, userId: string): Promise<OptionOrderEntity[]> {
-    try {
-      if (client) {
-        const result = await client.query<IOrderRow>(
-          `UPDATE option_orders
-           SET status = 'CANCELLED',
-               updated_at = NOW()
-           WHERE user_id = $1 AND status = 'PENDING'
-           RETURNING id, client_order_id, user_id, contract_id, order_type, transaction_type,
-                     product_type, quantity, price, trigger_price, target_price, trailing_stop_loss, average_price, status,
-                     rejection_reason, executed_at, created_at, updated_at`,
-          [userId]
-        );
+    const cancelSql = `
+      UPDATE option_orders
+      SET status = 'CANCELLED',
+          updated_at = NOW()
+      WHERE user_id = $1 AND status = 'PENDING'
+      RETURNING id, client_order_id, user_id, contract_id, order_type, transaction_type,
+                product_type, quantity, price, trigger_price, target_price, trailing_stop_loss,
+                average_price, status, rejection_reason, executed_at, created_at, updated_at`;
 
-        if (result.rows.length > 0) {
-          return result.rows.map((r) => {
-            const entity = this.mapRowToEntity(r);
-            OrdersRepository.memOrders.set(entity.id, entity);
-            return entity;
-          });
-        }
+    try {
+      const result = client
+        ? await client.query<IOrderRow>(cancelSql, [userId])
+        : await db.query<IOrderRow>(cancelSql, [userId]);
+
+      if (result.rows.length > 0) {
+        return result.rows.map((r) => {
+          const entity = this.mapRowToEntity(r);
+          const prev = OrdersRepository.memOrders.get(entity.id);
+          if (prev) {
+            entity.tradingSymbol = prev.tradingSymbol;
+            entity.symbol = prev.symbol;
+            entity.strikePrice = prev.strikePrice;
+            entity.optionType = prev.optionType;
+          }
+          OrdersRepository.memOrders.set(entity.id, entity);
+          return entity;
+        });
       }
     } catch {
       // Fallback
@@ -330,7 +376,7 @@ export class OrdersRepository {
 
     const cancelled: OptionOrderEntity[] = [];
     for (const [id, ord] of OrdersRepository.memOrders.entries()) {
-      if (ord.userId === userId && ord.status === 'PENDING') {
+      if (String(ord.userId) === String(userId) && ord.status === 'PENDING') {
         const updated: OptionOrderEntity = {
           ...ord,
           status: 'CANCELLED',

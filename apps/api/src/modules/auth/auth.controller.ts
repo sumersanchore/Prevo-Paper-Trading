@@ -32,6 +32,39 @@ export class AuthController {
     });
   }
 
+  public async googleLogin(req: Request, res: Response): Promise<void> {
+    const dto = req.body;
+    const result = await this.service.googleLogin(dto);
+
+    res.status(200).json({
+      success: true,
+      message: 'Google authentication successful.',
+      data: result,
+    });
+  }
+
+  public async sendEmailOtp(req: Request, res: Response): Promise<void> {
+    const dto = req.body;
+    const result = await this.service.sendEmailOtp(dto);
+
+    res.status(200).json({
+      success: true,
+      message: result.message,
+      data: result,
+    });
+  }
+
+  public async verifyEmailOtp(req: Request, res: Response): Promise<void> {
+    const dto = req.body;
+    const result = await this.service.verifyEmailOtp(dto);
+
+    res.status(200).json({
+      success: true,
+      message: 'Email OTP verification successful. Session authenticated.',
+      data: result,
+    });
+  }
+
   public async me(req: Request, res: Response): Promise<void> {
     if (!req.user || !req.user.id) {
       throw new UnauthorizedError('User context not found in request.');

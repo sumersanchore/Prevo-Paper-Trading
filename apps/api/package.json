@@ -17,6 +17,7 @@
   "dependencies": {
     "@trademitra/database": "workspace:*",
     "@trademitra/shared": "workspace:*",
+    "@types/nodemailer": "^8.0.1",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
@@ -24,6 +25,7 @@
     "express-rate-limit": "^7.5.0",
     "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.3",
+    "nodemailer": "^9.0.5",
     "socket.io": "^4.8.1",
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1",

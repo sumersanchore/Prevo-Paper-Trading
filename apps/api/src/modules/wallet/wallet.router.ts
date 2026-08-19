@@ -21,6 +21,21 @@ router.get('/', (req, res, next) => {
 
 /**
  * @openapi
+ * /wallet/transactions:
+ *   get:
+ *     summary: Get the user's wallet debit/credit transaction ledger (last 50 entries)
+ *     tags:
+ *       - Wallet
+ *     responses:
+ *       200:
+ *         description: Array of WalletTransactionEntity ordered newest first.
+ */
+router.get('/transactions', (req, res, next) => {
+  controller.getTransactions(req, res).catch(next);
+});
+
+/**
+ * @openapi
  * /wallet/reset:
  *   post:
  *     summary: Reset paper trading wallet funds to initial ₹10,00,000

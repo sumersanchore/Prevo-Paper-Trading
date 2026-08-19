@@ -13,16 +13,17 @@ import {
   KeyRound,
   RotateCcw,
   CheckCircle2,
-  X,
 } from 'lucide-react';
 import { useTradingStore } from '../../app/store/useTradingStore.js';
-import { useToast } from '../ui/Toast.js';
-import { signInWithFirebaseGoogle, signInWithFirebaseApple } from '../../lib/firebase.js';
+import { useToast } from '../../components/ui/Toast.js';
+import {
+  signInWithFirebaseGoogle,
+  signInWithFirebaseApple,
+} from '../../lib/firebase.js';
 
-export const AuthModal: React.FC = () => {
+export const AuthPage: React.FC = () => {
   const toast = useToast();
-  const { isAuthModalOpen, closeAuthModal, loginWithGoogle, sendEmailOtp, verifyEmailOtp, isLoading } =
-    useTradingStore();
+  const { loginWithGoogle, sendEmailOtp, verifyEmailOtp, isLoading } = useTradingStore();
 
   const [email, setEmail] = useState('');
   const [otpCode, setOtpCode] = useState('');
@@ -40,58 +41,7 @@ export const AuthModal: React.FC = () => {
     return () => clearInterval(timer);
   }, [resendCooldown]);
 
-  if (!isAuthModalOpen) return null;
-
-  const handleSkip = () => {
-    closeAuthModal();
-  };
-
-  const handleGoogleAuth = async () => {
-    setErrorMsg('');
-    setIsSocialLoading(true);
-    try {
-      const fbUser = await signInWithFirebaseGoogle();
-      await loginWithGoogle({
-        email: fbUser.email.toLowerCase(),
-        fullName: fbUser.fullName,
-        googleId: fbUser.uid,
-        avatarUrl: fbUser.photoUrl,
-      });
-      closeAuthModal();
-      toast.success('Signed in with Google', `Welcome back, ${fbUser.fullName}!`);
-    } catch (err: any) {
-      if (err?.code !== 'auth/popup-closed-by-user') {
-        const msg = err?.response?.data?.error?.message || err?.message || 'Google authentication failed.';
-        setErrorMsg(msg);
-      }
-    } finally {
-      setIsSocialLoading(false);
-    }
-  };
-
-  const handleAppleAuth = async () => {
-    setErrorMsg('');
-    setIsSocialLoading(true);
-    try {
-      const fbUser = await signInWithFirebaseApple();
-      await loginWithGoogle({
-        email: fbUser.email.toLowerCase(),
-        fullName: fbUser.fullName,
-        googleId: fbUser.uid,
-        avatarUrl: fbUser.photoUrl,
-      });
-      closeAuthModal();
-      toast.success('Signed in with Apple', `Welcome back, ${fbUser.fullName}!`);
-    } catch (err: any) {
-      if (err?.code !== 'auth/popup-closed-by-user') {
-        const msg = err?.response?.data?.error?.message || err?.message || 'Apple authentication failed.';
-        setErrorMsg(msg);
-      }
-    } finally {
-      setIsSocialLoading(false);
-    }
-  };
-
+  // 1. Send Email OTP
   const handleSendEmailOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanEmail = email.trim().toLowerCase();
@@ -105,16 +55,25 @@ export const AuthModal: React.FC = () => {
       const res = await sendEmailOtp({ email: cleanEmail });
       setIsOtpSent(true);
       setResendCooldown(30);
-      toast.success('Verification Code Sent', `6-digit OTP sent to ${cleanEmail}`);
+      toast.success(
+        'Verification Code Sent',
+        `6-digit OTP has been sent to ${cleanEmail}`
+      );
       if (res?.data?.devOtp) {
         toast.info('Development OTP', `Your test code is: ${res.data.devOtp}`);
       }
     } catch (err: any) {
-      const msg = err?.response?.data?.error?.message || err?.message || 'Failed to send verification code.';
+      const msg =
+        err?.response?.data?.error?.message ||
+        err?.response?.data?.message ||
+        err?.message ||
+        'Failed to send verification code. Please check your email.';
       setErrorMsg(msg);
+      toast.error('Email OTP Error', msg);
     }
   };
 
+  // 2. Verify Email OTP
   const handleVerifyEmailOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanCode = otpCode.trim();
@@ -129,17 +88,95 @@ export const AuthModal: React.FC = () => {
         email: email.trim().toLowerCase(),
         code: cleanCode,
       });
-      closeAuthModal();
-      toast.success('Signed In Successfully', 'Welcome to PREVO Terminal! ₹10,00,000 virtual capital activated.');
+
+      toast.success(
+        'Authentication Successful',
+        `Welcome to PREVO! ₹10,00,000 virtual capital activated.`
+      );
     } catch (err: any) {
-      const msg = err?.response?.data?.error?.message || err?.message || 'Invalid or expired verification code.';
+      const msg =
+        err?.response?.data?.error?.message ||
+        err?.response?.data?.message ||
+        err?.message ||
+        'Invalid or expired verification code. Please try again.';
       setErrorMsg(msg);
+      toast.error('Verification Failed', msg);
+    }
+  };
+
+  // 3. Google OAuth via Firebase
+  const handleGoogleAuth = async () => {
+    setErrorMsg('');
+    setIsSocialLoading(true);
+
+    try {
+      const firebaseUser = await signInWithFirebaseGoogle();
+      const googlePayload = {
+        email: firebaseUser.email.toLowerCase(),
+        fullName: firebaseUser.fullName,
+        googleId: firebaseUser.uid,
+        avatarUrl: firebaseUser.photoUrl,
+      };
+
+      await loginWithGoogle(googlePayload);
+      toast.success(
+        'Google Sign-In Successful',
+        `Welcome, ${firebaseUser.fullName}! ₹10,00,000 virtual capital active.`
+      );
+    } catch (err: any) {
+      if (err?.code === 'auth/popup-closed-by-user') {
+        toast.info('Sign-In Cancelled', 'Google sign-in popup was closed.');
+      } else {
+        const msg =
+          err?.response?.data?.error?.message ||
+          err?.message ||
+          'Google authentication failed.';
+        setErrorMsg(msg);
+        toast.error('Google Sign-In Error', msg);
+      }
+    } finally {
+      setIsSocialLoading(false);
+    }
+  };
+
+  // 4. Apple OAuth via Firebase
+  const handleAppleAuth = async () => {
+    setErrorMsg('');
+    setIsSocialLoading(true);
+
+    try {
+      const firebaseUser = await signInWithFirebaseApple();
+      const applePayload = {
+        email: firebaseUser.email.toLowerCase(),
+        fullName: firebaseUser.fullName,
+        googleId: firebaseUser.uid,
+        avatarUrl: firebaseUser.photoUrl,
+      };
+
+      await loginWithGoogle(applePayload);
+      toast.success(
+        'Apple Sign-In Successful',
+        `Welcome, ${firebaseUser.fullName}! ₹10,00,000 virtual capital active.`
+      );
+    } catch (err: any) {
+      if (err?.code === 'auth/popup-closed-by-user') {
+        toast.info('Sign-In Cancelled', 'Apple sign-in popup was closed.');
+      } else {
+        const msg =
+          err?.response?.data?.error?.message ||
+          err?.message ||
+          'Apple authentication failed.';
+        setErrorMsg(msg);
+        toast.error('Apple Sign-In Error', msg);
+      }
+    } finally {
+      setIsSocialLoading(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-950 text-white flex overflow-hidden font-sans selection:bg-[#00D09C] selection:text-black animate-fadeIn">
-      {/* ── Left Hero Side (7 cols on desktop) ── */}
+    <div className="w-screen h-screen min-h-screen bg-slate-950 text-white flex overflow-hidden font-sans selection:bg-[#00D09C] selection:text-black">
+      {/* ── Left Hero Side (7 cols on desktop, full height) ── */}
       <div className="hidden lg:flex lg:w-7/12 h-full bg-gradient-to-br from-[#07090E] via-[#0B1713] to-[#07090E] p-10 xl:p-14 flex-col justify-between relative border-r border-slate-800/80 overflow-hidden">
         {/* Ambient Glows */}
         <div className="absolute -top-24 -left-24 w-96 h-96 bg-emerald-500/15 rounded-full blur-3xl pointer-events-none" />
@@ -241,11 +278,10 @@ export const AuthModal: React.FC = () => {
         </div>
       </div>
 
-      {/* ── Right Form Side (5 cols on desktop, full width on mobile) ── */}
-      <div className="w-full lg:w-5/12 h-full bg-white text-slate-900 flex flex-col justify-between p-6 sm:p-10 xl:p-12 overflow-y-auto relative">
-        {/* Top Bar: Mobile Logo + TOP RIGHT SKIP BUTTON */}
+      {/* ── Right Form Side (5 cols on desktop, vertically elevated by 60-80px) ── */}
+      <div className="w-full lg:w-5/12 h-full bg-white text-slate-900 flex flex-col justify-between p-6 sm:p-10 xl:p-12 overflow-y-auto">
+        {/* Top Header Bar with TOP RIGHT SKIP BUTTON */}
         <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-          {/* Mobile Logo */}
           <div className="flex lg:hidden items-center gap-2">
             <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-[#00D09C] to-[#008f6b] flex items-center justify-center shadow-sm">
               <Activity className="w-4 h-4 text-black font-extrabold stroke-[2.5]" />
@@ -258,29 +294,21 @@ export const AuthModal: React.FC = () => {
           <div className="hidden lg:block" />
 
           {/* TOP RIGHT SKIP BUTTON */}
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handleSkip}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 hover:text-slate-900 text-xs font-extrabold transition-all cursor-pointer shadow-2xs group active:scale-95"
-            >
-              <span>Skip</span>
-              <ArrowRight className="w-3.5 h-3.5 text-slate-500 group-hover:text-slate-900 group-hover:translate-x-0.5 transition-transform" />
-            </button>
-
-            <button
-              type="button"
-              onClick={closeAuthModal}
-              className="p-1.5 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
-              title="Close (Esc)"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={() => {
+              window.history.pushState(null, '', '/explore');
+              window.dispatchEvent(new PopStateEvent('popstate'));
+            }}
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 hover:text-slate-900 text-xs font-extrabold transition-all cursor-pointer shadow-2xs group active:scale-95 ml-auto"
+          >
+            <span>Skip</span>
+            <ArrowRight className="w-3.5 h-3.5 text-slate-500 group-hover:text-slate-900 group-hover:translate-x-0.5 transition-transform" />
+          </button>
         </div>
 
-        {/* Main Form Container */}
-        <div className="max-w-md w-full mx-auto my-auto lg:my-0 lg:pt-6 xl:pt-10 pb-4 space-y-5">
+        {/* Main Form Container - Shifted upward for balanced fintech aesthetics */}
+        <div className="max-w-md w-full mx-auto my-auto lg:my-0 lg:pt-8 xl:pt-12 pb-4 space-y-5">
           {/* Brand Wordmark / Header */}
           <div>
             <div className="hidden lg:flex items-center gap-2 mb-3">

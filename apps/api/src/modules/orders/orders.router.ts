@@ -60,7 +60,7 @@ const controller = new OrdersController();
  *         description: Insufficient margin.
  */
 router.post('/', orderPlacementRateLimiter, validateBody(PlaceOrderSchema), (req, res, next) => {
-  controller.placeOrder(req, res).catch(next);
+  controller.placeOrder(req, res, next);
 });
 
 /**
@@ -81,7 +81,7 @@ router.post('/', orderPlacementRateLimiter, validateBody(PlaceOrderSchema), (req
  *         description: Array of orders.
  */
 router.get('/', (req, res, next) => {
-  controller.getOrders(req, res).catch(next);
+  controller.getOrders(req, res, next);
 });
 
 /**
@@ -101,6 +101,10 @@ router.get('/', (req, res, next) => {
  *       200:
  *         description: Order details.
  */
+router.get('/:id', (req, res, next) => {
+  controller.getOrder(req, res, next);
+});
+
 /**
  * @openapi
  * /orders/{id}:
@@ -134,7 +138,7 @@ router.get('/', (req, res, next) => {
  *         description: Order modified successfully.
  */
 router.put('/:id', validateBody(ModifyOrderSchema), (req, res, next) => {
-  controller.modifyOrder(req, res).catch(next);
+  controller.modifyOrder(req, res, next);
 });
 
 /**
@@ -151,7 +155,7 @@ router.put('/:id', validateBody(ModifyOrderSchema), (req, res, next) => {
  *         description: Cancelled orders array.
  */
 router.delete('/cancel-all', (req, res, next) => {
-  controller.cancelAllOrders(req, res).catch(next);
+  controller.cancelAllOrders(req, res, next);
 });
 
 /**
@@ -174,7 +178,7 @@ router.delete('/cancel-all', (req, res, next) => {
  *         description: Order cancelled successfully.
  */
 router.delete('/:id', (req, res, next) => {
-  controller.cancelOrder(req, res).catch(next);
+  controller.cancelOrder(req, res, next);
 });
 
 export const ordersRouter: Router = router;

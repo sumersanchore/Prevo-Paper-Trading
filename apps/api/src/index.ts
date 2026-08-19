@@ -1,5 +1,6 @@
 import http from 'node:http';
 import { Server as SocketIOServer } from 'socket.io';
+import { autoMigrateDatabase } from '@trademitra/database';
 import { createServer } from './http/server.js';
 import { config } from './config/env.config.js';
 import { logger } from './core/logger.js';
@@ -7,6 +8,15 @@ import { SocketStreamHandler } from './sockets/stream.handler.js';
 import { McpFeedProvider } from './providers/mcp.provider.js';
 
 async function bootstrap() {
+  // 1. Auto-create & verify production database tables on startup
+  try {
+    logger.info('📦 Verifying & auto-migrating database tables for production...');
+    await autoMigrateDatabase();
+    logger.info('✅ Production database tables verified and up to date.');
+  } catch (dbErr: any) {
+    logger.error(`❌ Database auto-migration warning: ${dbErr?.message || dbErr}`);
+  }
+
   const app = createServer();
   const httpServer = http.createServer(app);
 

@@ -21,6 +21,32 @@ export const LoginSchema = z.object({
 
 export type LoginDto = z.infer<typeof LoginSchema>;
 
+export const GoogleAuthSchema = z.object({
+  email: z.string().email('Please provide a valid email address'),
+  fullName: z.string().min(1, 'Full name is required'),
+  googleId: z.string().optional(),
+  avatarUrl: z.string().optional(),
+});
+
+export type GoogleAuthDto = z.infer<typeof GoogleAuthSchema>;
+
+export const SendEmailOtpSchema = z.object({
+  email: z.string().email('Please provide a valid email address'),
+  fullName: z.string().optional(),
+  phone: z.string().optional(),
+});
+
+export type SendEmailOtpDto = z.infer<typeof SendEmailOtpSchema>;
+
+export const VerifyEmailOtpSchema = z.object({
+  email: z.string().email('Please provide a valid email address'),
+  code: z.string().min(4, 'Verification code is required').max(10),
+  fullName: z.string().optional(),
+  phone: z.string().optional(),
+});
+
+export type VerifyEmailOtpDto = z.infer<typeof VerifyEmailOtpSchema>;
+
 export const PlaceOrderSchema = z.object({
   contractId: z.string().min(1, 'Contract ID is required'),
   orderType: z.enum(['MARKET', 'LIMIT', 'SL', 'SL-M'], {

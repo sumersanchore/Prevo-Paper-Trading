@@ -98,6 +98,28 @@ apiClient.interceptors.response.use(
   }
 );
 
+// ── In-Flight Request Deduplication Pool ──────────────────────────────
+// Prevents duplicate concurrent HTTP requests across components
+const inFlightRequests = new Map<string, Promise<any>>();
+
+const deduplicateGet = async <T>(key: string, fetcher: () => Promise<T>): Promise<T> => {
+  const existing = inFlightRequests.get(key);
+  if (existing) {
+    return existing as Promise<T>;
+  }
+
+  const promise = fetcher().finally(() => {
+    inFlightRequests.delete(key);
+  });
+
+  inFlightRequests.set(key, promise);
+  return promise;
+};
+
+export const clearApiCache = () => {
+  inFlightRequests.clear();
+};
+
 export const api = {
   // Authentication
   login: async (email: string, password: string) => {
@@ -108,6 +130,7 @@ export const api = {
     if (res.data?.data?.user) {
       setStoredUser(res.data.data.user);
     }
+    clearApiCache();
     return res.data.data;
   },
 
@@ -119,19 +142,52 @@ export const api = {
     if (res.data?.data?.user) {
       setStoredUser(res.data.data.user);
     }
+    clearApiCache();
+    return res.data.data;
+  },
+
+  loginWithGoogle: async (payload: { email: string; fullName: string; googleId?: string; avatarUrl?: string }) => {
+    const res = await apiClient.post('/auth/google', payload);
+    if (res.data?.data?.token) {
+      setStoredToken(res.data.data.token);
+    }
+    if (res.data?.data?.user) {
+      setStoredUser(res.data.data.user);
+    }
+    clearApiCache();
+    return res.data.data;
+  },
+
+  sendEmailOtp: async (payload: { email: string; fullName?: string; phone?: string }) => {
+    const res = await apiClient.post('/auth/email-otp/send', payload);
+    return res.data;
+  },
+
+  verifyEmailOtp: async (payload: { email: string; code: string; fullName?: string; phone?: string }) => {
+    const res = await apiClient.post('/auth/email-otp/verify', payload);
+    if (res.data?.data?.token) {
+      setStoredToken(res.data.data.token);
+    }
+    if (res.data?.data?.user) {
+      setStoredUser(res.data.data.user);
+    }
+    clearApiCache();
     return res.data.data;
   },
 
   getMe: async () => {
-    const res = await apiClient.get('/auth/me');
-    if (res.data?.data?.user) {
-      setStoredUser(res.data.data.user);
-    }
-    return res.data.data;
+    return deduplicateGet('auth:me', async () => {
+      const res = await apiClient.get('/auth/me');
+      if (res.data?.data?.user) {
+        setStoredUser(res.data.data.user);
+      }
+      return res.data.data;
+    });
   },
 
   logout: () => {
     clearStoredToken();
+    clearApiCache();
   },
 
   // Health & Market Data
@@ -142,29 +198,45 @@ export const api = {
 
   // Wallet
   getWallet: async () => {
-    const res = await apiClient.get('/wallet');
-    return res.data.data;
+    return deduplicateGet('wallet:active', async () => {
+      const res = await apiClient.get('/wallet');
+      return res.data.data;
+    });
   },
 
   resetWallet: async () => {
+    clearApiCache();
     const res = await apiClient.post('/wallet/reset');
     return res.data.data;
   },
 
+  getWalletTransactions: async () => {
+    return deduplicateGet('wallet:transactions', async () => {
+      const res = await apiClient.get('/wallet/transactions');
+      return res.data.data as import('@trademitra/shared').WalletTransactionEntity[];
+    });
+  },
+
   // Option Chain
   getOptionChain: async (symbol = 'NIFTY', expiry?: string) => {
-    const res = await apiClient.get('/contracts/option-chain', {
-      params: { symbol, expiry },
+    const cacheKey = `option-chain:${symbol}:${expiry || 'current'}`;
+    return deduplicateGet(cacheKey, async () => {
+      const res = await apiClient.get('/contracts/option-chain', {
+        params: { symbol, expiry },
+      });
+      return res.data.data;
     });
-    return res.data.data;
   },
 
   // Orders
   getOrders: async (status?: string) => {
-    const res = await apiClient.get('/orders', {
-      params: { status },
+    const cacheKey = `orders:${status || 'all'}`;
+    return deduplicateGet(cacheKey, async () => {
+      const res = await apiClient.get('/orders', {
+        params: { status },
+      });
+      return res.data.data;
     });
-    return res.data.data;
   },
 
   placeOrder: async (payload: {
@@ -178,6 +250,7 @@ export const api = {
     targetPrice?: number;
     trailingStopLoss?: number;
   }) => {
+    clearApiCache();
     const res = await apiClient.post('/orders', payload);
     return res.data.data;
   },
@@ -192,23 +265,48 @@ export const api = {
       quantity?: number;
     }
   ) => {
+    clearApiCache();
     const res = await apiClient.put(`/orders/${orderId}`, payload);
     return res.data.data;
   },
 
   cancelOrder: async (orderId: string) => {
+    clearApiCache();
     const res = await apiClient.delete(`/orders/${orderId}`);
     return res.data.data;
   },
 
   cancelAllOrders: async () => {
+    clearApiCache();
     const res = await apiClient.delete('/orders/cancel-all');
     return res.data.data;
   },
 
   // Positions
   getPositions: async () => {
-    const res = await apiClient.get('/positions');
+    return deduplicateGet('positions:active', async () => {
+      const res = await apiClient.get('/positions');
+      return res.data.data;
+    });
+  },
+
+  // Notifications
+  getNotifications: async () => {
+    return deduplicateGet('notifications:list', async () => {
+      const res = await apiClient.get('/notifications');
+      return res.data.data as import('@trademitra/shared').NotificationEntity[];
+    });
+  },
+
+  markNotificationsRead: async (notificationId?: string) => {
+    clearApiCache();
+    const res = await apiClient.post('/notifications/mark-read', { notificationId });
+    return res.data;
+  },
+
+  broadcastNotification: async (title: string, message: string, data?: any) => {
+    clearApiCache();
+    const res = await apiClient.post('/notifications/broadcast', { title, message, data });
     return res.data.data;
   },
 };

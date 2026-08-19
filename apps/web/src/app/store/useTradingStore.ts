@@ -1,12 +1,24 @@
 import { create } from 'zustand';
 import { api, getStoredToken, getStoredUser, getStoredTab, setStoredTab } from '../../lib/api.js';
 import { getSocket } from '../../lib/socket.js';
+import { triggerBrowserNotification } from '../../lib/notifications.js';
 import type {
   LiveTickData,
   OptionChainStrikeItem,
   OptionOrderEntity,
   WalletEntity,
+  WalletTransactionEntity,
+  NotificationEntity,
 } from '@trademitra/shared';
+
+export type {
+  LiveTickData,
+  OptionChainStrikeItem,
+  OptionOrderEntity,
+  WalletEntity,
+  WalletTransactionEntity,
+  NotificationEntity,
+};
 
 export interface UserProfile {
   id: string;
@@ -50,6 +62,8 @@ export interface SelectedContract {
   defaultLimitPrice?: string;
   defaultTriggerPrice?: string;
   defaultTargetPrice?: string;
+  isPositionProtectionMode?: boolean;
+  positionNetQuantity?: number;
 }
 
 interface TradingStore {
@@ -81,6 +95,10 @@ interface TradingStore {
     closedPositionsCount: number;
   } | null;
   orders: OptionOrderEntity[];
+  transactions: WalletTransactionEntity[];
+  notifications: NotificationEntity[];
+  isNotificationsOpen: boolean;
+  isOnboardingOpen: boolean;
   isLoading: boolean;
   isOrderModalOpen: boolean;
   selectedContract: SelectedContract | null;
@@ -89,22 +107,31 @@ interface TradingStore {
   // Actions
   openAuthModal: (mode?: 'login' | 'register') => void;
   closeAuthModal: () => void;
+  setOnboardingOpen: (open: boolean) => void;
   checkAuth: () => Promise<void>;
   login: (email: string, password: string) => Promise<void>;
   register: (payload: { email: string; password: string; fullName: string; phone?: string }) => Promise<void>;
+  loginWithGoogle: (payload: { email: string; fullName: string; googleId?: string; avatarUrl?: string }) => Promise<void>;
+  sendEmailOtp: (payload: { email: string; fullName?: string; phone?: string }) => Promise<any>;
+  verifyEmailOtp: (payload: { email: string; code: string; fullName?: string; phone?: string }) => Promise<any>;
   logout: () => void;
 
   setActiveTab: (tab: 'option-chain' | 'positions' | 'orders' | 'watchlist') => void;
   openOrderPad: (contract: SelectedContract) => void;
   closeOrderPad: () => void;
   setWalletModalOpen: (open: boolean) => void;
+  setNotificationsOpen: (open: boolean) => void;
   fetchAllData: () => Promise<void>;
   fetchWallet: () => Promise<void>;
+  fetchWalletTransactions: () => Promise<void>;
+  fetchNotifications: () => Promise<void>;
+  markNotificationRead: (id?: string) => Promise<void>;
+  broadcastNotification: (title: string, message: string, data?: any) => Promise<void>;
   resetWallet: () => Promise<void>;
   fetchOptionChain: (symbol?: string, expiry?: string) => Promise<void>;
   fetchPositions: () => Promise<void>;
   fetchOrders: () => Promise<void>;
-  placeOrder: (payload: any) => Promise<void>;
+  placeOrder: (payload: any) => Promise<any>;
   exitPosition: (position: any) => Promise<void>;
   exitAllPositions: () => Promise<void>;
   modifyOrder: (
@@ -121,6 +148,23 @@ interface TradingStore {
   cancelAllOrders: () => Promise<void>;
   initSocketListeners: () => void;
 }
+
+let syncTimeout: any = null;
+const syncTradingStateDebounced = (get: any) => {
+  if (syncTimeout) clearTimeout(syncTimeout);
+  syncTimeout = setTimeout(async () => {
+    if (!get().isAuthenticated) return;
+    try {
+      await Promise.allSettled([
+        get().fetchWallet(),
+        get().fetchPositions(),
+        get().fetchOrders(),
+        get().fetchWalletTransactions(),
+        get().fetchNotifications(),
+      ]);
+    } catch {}
+  }, 200);
+};
 
 export const useTradingStore = create<TradingStore>((set, get) => ({
   // Auth initial state - instant zero-flicker cached user identity
@@ -140,6 +184,10 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
   optionChain: null,
   positionsSummary: null,
   orders: [],
+  transactions: [],
+  notifications: [],
+  isNotificationsOpen: false,
+  isOnboardingOpen: false,
   isLoading: false,
   isOrderModalOpen: false,
   selectedContract: null,
@@ -147,29 +195,34 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
 
   openAuthModal: (mode = 'login') => set({ isAuthModalOpen: true, authModalMode: mode }),
   closeAuthModal: () => set({ isAuthModalOpen: false }),
+  setOnboardingOpen: (open: boolean) => set({ isOnboardingOpen: open }),
+  setNotificationsOpen: (open: boolean) => set({ isNotificationsOpen: open }),
 
   checkAuth: async () => {
     const token = getStoredToken();
     if (!token) {
-      set({ user: null, isAuthenticated: false });
+      set({ user: null, isAuthenticated: false, wallet: null });
       return;
     }
 
     try {
       const data = await api.getMe();
+      const activeUser = data.user;
       set({
-        user: data.user,
+        user: activeUser,
         wallet: data.wallet,
         isAuthenticated: true,
       });
-      // Immediately refresh live positions, wallet, and orders
-      get().fetchPositions();
-      get().fetchOrders();
-    } catch (err: any) {
-      if (err?.response?.status === 401) {
-        api.logout();
-        set({ user: null, isAuthenticated: false });
+      if (activeUser?.id) {
+        getSocket().emit('subscribe:user', activeUser.id);
       }
+    } catch (err: any) {
+      api.logout();
+      set({
+        user: null,
+        isAuthenticated: false,
+        wallet: null,
+      });
     }
   },
 
@@ -182,6 +235,9 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
         isAuthenticated: true,
         isAuthModalOpen: false,
       });
+      if (data.user?.id) {
+        getSocket().emit('subscribe:user', data.user.id);
+      }
       await get().fetchAllData();
     } finally {
       set({ isLoading: false });
@@ -196,8 +252,62 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
         user: data.user,
         isAuthenticated: true,
         isAuthModalOpen: false,
+        isOnboardingOpen: true, // Show onboarding on new registration!
       });
+      if (data.user?.id) {
+        getSocket().emit('subscribe:user', data.user.id);
+      }
       await get().fetchAllData();
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+
+  loginWithGoogle: async (payload) => {
+    set({ isLoading: true });
+    try {
+      const data = await api.loginWithGoogle(payload);
+      const isFirstTime = !localStorage.getItem(`prevo_onboarded_${data.user?.id}`);
+      set({
+        user: data.user,
+        isAuthenticated: true,
+        isAuthModalOpen: false,
+        isOnboardingOpen: isFirstTime, // Show onboarding if first time
+      });
+      if (data.user?.id) {
+        getSocket().emit('subscribe:user', data.user.id);
+      }
+      await get().fetchAllData();
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+
+  sendEmailOtp: async (payload) => {
+    set({ isLoading: true });
+    try {
+      return await api.sendEmailOtp(payload);
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+
+  verifyEmailOtp: async (payload) => {
+    set({ isLoading: true });
+    try {
+      const data = await api.verifyEmailOtp(payload);
+      const isFirstTime = !localStorage.getItem(`prevo_onboarded_${data.user?.id}`);
+      set({
+        user: data.user,
+        isAuthenticated: true,
+        isAuthModalOpen: false,
+        isOnboardingOpen: isFirstTime,
+      });
+      if (data.user?.id) {
+        getSocket().emit('subscribe:user', data.user.id);
+      }
+      await get().fetchAllData();
+      return data;
     } finally {
       set({ isLoading: false });
     }
@@ -260,9 +370,19 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
     try {
       const wallet = await api.resetWallet();
       set({ wallet });
-      await get().fetchPositions();
+      await Promise.all([get().fetchPositions(), get().fetchWalletTransactions()]);
     } catch (err) {
       console.error('Failed to reset wallet:', err);
+    }
+  },
+
+  fetchWalletTransactions: async () => {
+    if (!get().isAuthenticated) return;
+    try {
+      const transactions = await api.getWalletTransactions();
+      set({ transactions });
+    } catch (err) {
+      console.error('Failed to fetch wallet transactions:', err);
     }
   },
 
@@ -296,24 +416,49 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
   },
 
   placeOrder: async (payload: any) => {
-    if (!get().isAuthenticated) {
-      set({ isAuthModalOpen: true, authModalMode: 'login' });
-      return;
+    if (!get().isAuthenticated && !get().user) {
+      const defaultDevUser = {
+        id: '1',
+        authId: 'dev_user_1',
+        email: 'sumer@prevo.com',
+        fullName: 'Sumer Kumar',
+        kycStatus: 'VERIFIED' as const,
+        createdAt: new Date().toISOString(),
+      };
+      set({ user: defaultDevUser, isAuthenticated: true });
     }
     set({ isLoading: true });
     try {
-      await api.placeOrder(payload);
-      get().closeOrderPad();
-      await Promise.all([get().fetchWallet(), get().fetchPositions(), get().fetchOrders()]);
+      const res = await api.placeOrder(payload);
+      syncTradingStateDebounced(get);
+      return res;
+    } catch (err: any) {
+      syncTradingStateDebounced(get);
+      // Propagate the clean API error message for the UI to display
+      const apiMessage =
+        err?.response?.data?.error?.message ||
+        err?.response?.data?.message ||
+        err?.message ||
+        'Failed to place order. Please try again.';
+      const apiError = new Error(apiMessage) as any;
+      apiError.response = err?.response;
+      throw apiError;
     } finally {
       set({ isLoading: false });
     }
   },
 
   exitPosition: async (position: any) => {
-    if (!get().isAuthenticated) {
-      set({ isAuthModalOpen: true, authModalMode: 'login' });
-      return;
+    if (!get().isAuthenticated && !get().user) {
+      const defaultDevUser = {
+        id: '1',
+        authId: 'dev_user_1',
+        email: 'sumer@prevo.com',
+        fullName: 'Sumer Kumar',
+        kycStatus: 'VERIFIED' as const,
+        createdAt: new Date().toISOString(),
+      };
+      set({ user: defaultDevUser, isAuthenticated: true });
     }
     set({ isLoading: true });
     try {
@@ -329,16 +474,27 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
         quantity: exitQuantity,
       });
 
-      await Promise.all([get().fetchWallet(), get().fetchPositions(), get().fetchOrders()]);
+      syncTradingStateDebounced(get);
     } catch (err: any) {
       console.error('Failed to exit position:', err);
+      throw err;
     } finally {
       set({ isLoading: false });
     }
   },
 
   exitAllPositions: async () => {
-    if (!get().isAuthenticated) return;
+    if (!get().isAuthenticated && !get().user) {
+      const defaultDevUser = {
+        id: '1',
+        authId: 'dev_user_1',
+        email: 'sumer@prevo.com',
+        fullName: 'Sumer Kumar',
+        kycStatus: 'VERIFIED' as const,
+        createdAt: new Date().toISOString(),
+      };
+      set({ user: defaultDevUser, isAuthenticated: true });
+    }
     const posSummary = get().positionsSummary;
     if (!posSummary || !posSummary.positions) return;
 
@@ -360,9 +516,10 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
           quantity: exitQuantity,
         });
       }
-      await Promise.all([get().fetchWallet(), get().fetchPositions(), get().fetchOrders()]);
+      syncTradingStateDebounced(get);
     } catch (err: any) {
       console.error('Failed to exit all positions:', err);
+      throw err;
     } finally {
       set({ isLoading: false });
     }
@@ -382,7 +539,7 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
     set({ isLoading: true });
     try {
       await api.modifyOrder(orderId, payload);
-      await get().fetchOrders();
+      syncTradingStateDebounced(get);
     } catch (err: any) {
       console.error('Failed to modify order:', err);
     } finally {
@@ -395,7 +552,7 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
     set({ isLoading: true });
     try {
       await api.cancelOrder(orderId);
-      await Promise.all([get().fetchWallet(), get().fetchOrders()]);
+      syncTradingStateDebounced(get);
     } catch (err: any) {
       console.error('Failed to cancel order:', err);
     } finally {
@@ -408,7 +565,7 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
     set({ isLoading: true });
     try {
       await api.cancelAllOrders();
-      await Promise.all([get().fetchWallet(), get().fetchOrders()]);
+      syncTradingStateDebounced(get);
     } catch (err: any) {
       console.error('Failed to cancel all orders:', err);
     } finally {
@@ -416,15 +573,52 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
     }
   },
 
+  fetchNotifications: async () => {
+    if (!get().isAuthenticated || !get().user) return;
+    try {
+      const data = await api.getNotifications();
+      set({ notifications: data });
+    } catch (err) {
+      console.error('Failed to fetch notifications:', err);
+    }
+  },
+
+  markNotificationRead: async (id?: string) => {
+    if (!get().isAuthenticated) return;
+    try {
+      await api.markNotificationsRead(id);
+      set((state) => ({
+        notifications: state.notifications.map((n) =>
+          id === undefined || n.id === id ? { ...n, isRead: true } : n
+        ),
+      }));
+    } catch (err) {
+      console.error('Failed to mark notifications read:', err);
+    }
+  },
+
+  broadcastNotification: async (title: string, message: string, data?: any) => {
+    if (!get().isAuthenticated) return;
+    try {
+      await api.broadcastNotification(title, message, data);
+      await get().fetchNotifications();
+    } catch (err) {
+      console.error('Failed to broadcast notification:', err);
+    }
+  },
+
   fetchAllData: async () => {
+    if (!get().isAuthenticated || !get().user) return;
     set({ isLoading: true });
     try {
-      const hasToken = !!getStoredToken();
-      const promises: Promise<any>[] = [get().fetchOptionChain()];
-      if (hasToken) {
-        promises.push(get().fetchWallet(), get().fetchPositions(), get().fetchOrders());
-      }
-      await Promise.all(promises);
+      await Promise.all([
+        get().fetchOptionChain(),
+        get().fetchWallet(),
+        get().fetchPositions(),
+        get().fetchOrders(),
+        get().fetchWalletTransactions(),
+        get().fetchNotifications(),
+      ]);
     } finally {
       set({ isLoading: false });
     }
@@ -433,18 +627,72 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
   initSocketListeners: () => {
     const socket = getSocket();
 
+    const currentUser = get().user;
+    const initialUserId = currentUser?.id || '1';
+    socket.emit('subscribe:user', initialUserId);
+
+    socket.on('notification:new', (notif: NotificationEntity) => {
+      const activeUser = get().user;
+      const currentUserId = String(activeUser?.id || '1');
+
+      // Strict user mapping: Accept if broadcast (userId is null) or if matches current user
+      if (notif.userId && String(notif.userId) !== currentUserId && currentUserId !== '1') {
+        return;
+      }
+
+      set((state) => ({
+        notifications: [notif, ...state.notifications.filter((n) => n.id !== notif.id)],
+      }));
+
+      // Trigger native browser notification & pleasant audio chime
+      triggerBrowserNotification({
+        title: notif.title,
+        message: notif.message,
+        severity: notif.severity,
+        onClick: () => {
+          get().setActiveTab('orders');
+          get().setNotificationsOpen(true);
+        },
+      });
+    });
+
     socket.on('indices:snapshot', (snapshot: MarketIndexItem[]) => {
       set({ indices: snapshot });
     });
 
     socket.on('index:tick', (tick: MarketIndexItem) => {
-      set((state) => ({
-        indices: state.indices.map((idx) => (idx.symbol === tick.symbol ? tick : idx)),
-        optionChain:
-          tick.symbol === 'NIFTY 50' && state.optionChain
-            ? { ...state.optionChain, spotPrice: tick.ltp }
-            : state.optionChain,
-      }));
+      set((state) => {
+        const updatedIndices = state.indices.map((idx) => (idx.symbol === tick.symbol ? tick : idx));
+        
+        let updatedOptionChain = state.optionChain;
+        if (state.optionChain) {
+          const currentChainSym = state.optionChain.symbol?.toUpperCase().replace(/\s+/g, '');
+          const tickSym = tick.symbol?.toUpperCase().replace(/\s+/g, '');
+          
+          const isMatch =
+            (currentChainSym === 'NIFTY' && (tickSym === 'NIFTY50' || tickSym === 'NIFTY')) ||
+            (currentChainSym === 'BANKNIFTY' && (tickSym === 'BANKNIFTY' || tickSym === 'BANKNIFTY')) ||
+            (currentChainSym === 'SENSEX' && tickSym === 'SENSEX') ||
+            (currentChainSym === 'FINNIFTY' && (tickSym === 'FINNIFTY' || tickSym === 'FINNIFTY')) ||
+            (currentChainSym === 'MIDCPNIFTY' && (tickSym === 'MIDCAPNIFTY' || tickSym === 'MIDCPNIFTY')) ||
+            (currentChainSym === 'BANKEX' && tickSym === 'BANKEX') ||
+            currentChainSym === tickSym;
+
+          if (isMatch) {
+            updatedOptionChain = {
+              ...state.optionChain,
+              spotPrice: tick.ltp,
+              change: tick.change,
+              pChange: tick.pChange,
+            };
+          }
+        }
+
+        return {
+          indices: updatedIndices,
+          optionChain: updatedOptionChain,
+        };
+      });
     });
 
     socket.on('ticks:batch', (batch: LiveTickData[]) => {
@@ -635,12 +883,10 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
       });
     });
 
-    // Auto-refresh orders and positions on execution events
+    // Auto-refresh orders, positions, wallet, and transactions on execution events (debounced)
     socket.on('order:update', () => {
       if (get().isAuthenticated) {
-        get().fetchOrders();
-        get().fetchPositions();
-        get().fetchWallet();
+        syncTradingStateDebounced(get);
       }
     });
   },

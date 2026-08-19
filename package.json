@@ -12,6 +12,7 @@
     "web": "npx pnpm --filter @trademitra/web dev",
     "db:reset": "npx pnpm --filter @trademitra/database build && npx pnpm --filter @trademitra/database run db:reset",
     "db:setup": "npx pnpm --filter @trademitra/database build && npx pnpm --filter @trademitra/database run db:setup",
+    "db:migrate": "npx pnpm --filter @trademitra/database build && npx pnpm --filter @trademitra/database run db:migrate",
     "build": "npx turbo run build",
     "lint": "npx turbo run lint",
     "test": "npx turbo run test",
