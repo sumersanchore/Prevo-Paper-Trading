@@ -4,17 +4,21 @@ let socket: Socket | null = null;
 
 export const getSocket = (): Socket => {
   if (!socket) {
+    const isProduction =
+      import.meta.env.PROD ||
+      (typeof window !== 'undefined' &&
+        window.location.hostname !== 'localhost' &&
+        window.location.hostname !== '127.0.0.1');
+
     const wsUrl =
       import.meta.env.VITE_WS_URL ||
-      (typeof window !== 'undefined' && import.meta.env.PROD
-        ? window.location.origin
-        : 'http://localhost:4000');
+      (isProduction ? window.location.origin : 'http://localhost:4000');
 
     socket = io(wsUrl, {
       transports: ['websocket', 'polling'],
       autoConnect: true,
-      reconnectionAttempts: 10,
-      reconnectionDelay: 1000,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 2000,
     });
   }
   return socket;

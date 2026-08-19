@@ -38,8 +38,8 @@ export function createServer(): Application {
     });
   });
 
-  // Domain API Routes
-  app.use(config.apiPrefix, mainRouter);
+  // Domain API Routes (Support both /api/v1 and /v1 for Vercel Serverless compatibility)
+  app.use([config.apiPrefix, '/v1'], mainRouter);
 
   // Global Error Handler
   app.use(errorHandler);

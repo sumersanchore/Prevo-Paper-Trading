@@ -56,4 +56,8 @@ async function bootstrap() {
   process.on('SIGTERM', shutdown);
 }
 
-void bootstrap();
+export { createServer };
+
+if (!process.env.VERCEL) {
+  void bootstrap();
+}

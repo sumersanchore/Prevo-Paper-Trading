@@ -33,4 +33,20 @@ const swaggerOptions: swaggerJsdoc.Options = {
   apis: ['./src/modules/**/*.router.ts', './src/modules/**/*.ts'],
 };
 
-export const swaggerSpec = swaggerJsdoc(swaggerOptions);
+let spec: any = {
+  openapi: '3.0.0',
+  info: {
+    title: 'PREVO Enterprise Paper Trading API',
+    version: '1.0.0',
+    description: 'PREVO REST & Real-time Paper Trading API',
+  },
+  paths: {},
+};
+
+try {
+  spec = swaggerJsdoc(swaggerOptions);
+} catch {
+  // Safe fallback in serverless or bundled environments
+}
+
+export const swaggerSpec = spec;
