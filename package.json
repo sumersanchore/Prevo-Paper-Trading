@@ -13,7 +13,7 @@
     "db:reset": "npx pnpm --filter @trademitra/database build && npx pnpm --filter @trademitra/database run db:reset",
     "db:setup": "npx pnpm --filter @trademitra/database build && npx pnpm --filter @trademitra/database run db:setup",
     "db:migrate": "npx pnpm --filter @trademitra/database build && npx pnpm --filter @trademitra/database run db:migrate",
-    "build": "npx turbo run build",
+    "build": "pnpm -r run build",
     "lint": "npx turbo run lint",
     "test": "npx turbo run test",
     "clean": "npx turbo run clean && rimraf node_modules",
