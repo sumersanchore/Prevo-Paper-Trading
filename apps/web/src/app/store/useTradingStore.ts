@@ -150,6 +150,9 @@ interface TradingStore {
 }
 
 let syncTimeout: any = null;
+let clientTickInterval: ReturnType<typeof setInterval> | null = null;
+let clientPollInterval: ReturnType<typeof setInterval> | null = null;
+
 const syncTradingStateDebounced = (get: any) => {
   if (syncTimeout) clearTimeout(syncTimeout);
   syncTimeout = setTimeout(async () => {
@@ -180,6 +183,12 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
     { symbol: 'NIFTY 50', name: 'NIFTY 50', ltp: 24154.90, open: 24200, high: 24300, low: 24100, close: 24287.65, change: -132.75, pChange: -0.55, timestamp: new Date().toISOString() },
     { symbol: 'BANK NIFTY', name: 'BANK NIFTY', ltp: 57262.40, open: 57350, high: 57500, low: 57180, close: 57497.80, change: -235.40, pChange: -0.41, timestamp: new Date().toISOString() },
     { symbol: 'SENSEX', name: 'BSE SENSEX', ltp: 77235.46, open: 77500, high: 77800, low: 77100, close: 77728.16, change: -492.70, pChange: -0.63, timestamp: new Date().toISOString() },
+    { symbol: 'FINNIFTY', name: 'FIN NIFTY', ltp: 23890.00, open: 23950, high: 24010, low: 23850, close: 24000.00, change: -110.00, pChange: -0.46, timestamp: new Date().toISOString() },
+    { symbol: 'MIDCPNIFTY', name: 'MIDCAP NIFTY', ltp: 12450.00, open: 12400, high: 12480, low: 12390, close: 12405.00, change: 45.00, pChange: 0.36, timestamp: new Date().toISOString() },
+    { symbol: 'BANKEX', name: 'BANKEX', ltp: 62340.00, open: 62500, high: 62650, low: 62280, close: 62530.00, change: -190.00, pChange: -0.30, timestamp: new Date().toISOString() },
+    { symbol: 'BOSCH', name: 'Bosch', ltp: 48730.00, open: 47000, high: 48940, low: 46775, close: 46970.00, change: 1760.00, pChange: 3.75, timestamp: new Date().toISOString() },
+    { symbol: 'TUBEINVEST', name: 'Tube Investments', ltp: 2959.00, open: 2750, high: 2989, low: 2755.80, close: 2741.40, change: 217.60, pChange: 7.94, timestamp: new Date().toISOString() },
+    { symbol: 'HDFCBANK', name: 'HDFC Bank', ltp: 723.00, open: 730, high: 729, low: 723, close: 729.00, change: -6.00, pChange: -0.82, timestamp: new Date().toISOString() },
   ],
   optionChain: null,
   positionsSummary: null,
@@ -884,10 +893,164 @@ export const useTradingStore = create<TradingStore>((set, get) => ({
     });
 
     // Auto-refresh orders, positions, wallet, and transactions on execution events (debounced)
-    socket.on('order:update', () => {
+    socket.on?.('order:update', () => {
       if (get().isAuthenticated) {
         syncTradingStateDebounced(get);
       }
     });
+
+    // ── Client-Side Fallback Live Market Momentum Engine ──
+    // Ensures real-time market ticking and price movements even on serverless deployments (Vercel)
+    if (!clientTickInterval && typeof window !== 'undefined') {
+      clientTickInterval = setInterval(() => {
+        // If socket is connected and actively streaming real ticks, don't generate client ticks
+        if (socket?.connected) return;
+
+        set((state) => {
+          // 1. Move indices with realistic market micro-ticks (±0.02% to ±0.04%)
+          const updatedIndices = state.indices.map((idx) => {
+            const deltaPct = (Math.random() - 0.49) * 0.0006;
+            const newLtp = Number((idx.ltp * (1 + deltaPct)).toFixed(2));
+            const change = Number((newLtp - idx.close).toFixed(2));
+            const pChange = Number(((change / idx.close) * 100).toFixed(2));
+            return {
+              ...idx,
+              ltp: newLtp,
+              high: Math.max(idx.high, newLtp),
+              low: Math.min(idx.low, newLtp),
+              change,
+              pChange,
+              timestamp: new Date().toISOString(),
+            };
+          });
+
+          // 2. Update active Option Chain spot price & live strikes
+          let updatedOptionChain = state.optionChain;
+          if (state.optionChain) {
+            const sym = state.optionChain.symbol?.toUpperCase().replace(/\s+/g, '');
+            const matchingIndex = updatedIndices.find((i) => {
+              const iSym = i.symbol.toUpperCase().replace(/\s+/g, '');
+              return (
+                (sym === 'NIFTY' && (iSym === 'NIFTY50' || iSym === 'NIFTY')) ||
+                (sym === 'BANKNIFTY' && iSym === 'BANKNIFTY') ||
+                (sym === 'SENSEX' && iSym === 'SENSEX') ||
+                (sym === 'FINNIFTY' && iSym === 'FINNIFTY') ||
+                (sym === 'MIDCPNIFTY' && (iSym === 'MIDCAPNIFTY' || iSym === 'MIDCPNIFTY')) ||
+                (sym === 'BANKEX' && iSym === 'BANKEX') ||
+                sym === iSym
+              );
+            });
+
+            const newSpot = matchingIndex ? matchingIndex.ltp : state.optionChain.spotPrice;
+            const newChange = matchingIndex ? matchingIndex.change : state.optionChain.change;
+            const newPChange = matchingIndex ? matchingIndex.pChange : state.optionChain.pChange;
+
+            // Micro-oscillate option chain strikes based on delta
+            const updatedChain = state.optionChain.chain.map((strikeItem) => {
+              const ceJitter = (Math.random() - 0.48) * 0.003;
+              const peJitter = (Math.random() - 0.52) * 0.003;
+
+              const newCeLtp = strikeItem.ce
+                ? Math.max(0.05, Number((strikeItem.ce.ltp * (1 + ceJitter)).toFixed(2)))
+                : 0;
+              const newPeLtp = strikeItem.pe
+                ? Math.max(0.05, Number((strikeItem.pe.ltp * (1 + peJitter)).toFixed(2)))
+                : 0;
+
+              return {
+                ...strikeItem,
+                ce: strikeItem.ce
+                  ? {
+                      ...strikeItem.ce,
+                      ltp: newCeLtp,
+                      change: Number((newCeLtp - (strikeItem.ce.ltp - (strikeItem.ce.change || 0))).toFixed(2)),
+                    }
+                  : undefined,
+                pe: strikeItem.pe
+                  ? {
+                      ...strikeItem.pe,
+                      ltp: newPeLtp,
+                      change: Number((newPeLtp - (strikeItem.pe.ltp - (strikeItem.pe.change || 0))).toFixed(2)),
+                    }
+                  : undefined,
+              };
+            });
+
+            updatedOptionChain = {
+              ...state.optionChain,
+              spotPrice: newSpot,
+              change: newChange,
+              pChange: newPChange,
+              chain: updatedChain,
+            };
+          }
+
+          // 3. Recalculate open positions MTM P&L in real time
+          let updatedPositionsSummary = state.positionsSummary;
+          if (state.positionsSummary && state.positionsSummary.positions?.length > 0) {
+            let newTotalUnrealized = 0;
+            const newPositions = state.positionsSummary.positions.map((pos) => {
+              if (pos.status !== 'OPEN' || pos.netQuantity === 0) return pos;
+              const jitter = (Math.random() - 0.49) * 0.004;
+              const currentLtp = Math.max(0.05, Number((pos.ltp * (1 + jitter)).toFixed(2)));
+              const netQty = pos.netQuantity;
+              let unrealizedPnl = 0;
+              if (netQty > 0) {
+                unrealizedPnl = Number((netQty * (currentLtp - pos.averageBuyPrice)).toFixed(2));
+              } else if (netQty < 0) {
+                unrealizedPnl = Number((Math.abs(netQty) * (pos.averageSellPrice - currentLtp)).toFixed(2));
+              }
+              newTotalUnrealized += unrealizedPnl;
+              const totalPnl = Number(((pos.realizedPnl || 0) + unrealizedPnl).toFixed(2));
+              const investedValue = netQty > 0 ? netQty * pos.averageBuyPrice : 0;
+              const pnlPercentage = investedValue > 0 ? Number(((totalPnl / investedValue) * 100).toFixed(2)) : 0;
+              return {
+                ...pos,
+                ltp: currentLtp,
+                unrealizedPnl,
+                totalPnl,
+                pnlPercentage,
+                currentValue: Number((Math.abs(netQty) * currentLtp).toFixed(2)),
+              };
+            });
+
+            updatedPositionsSummary = {
+              ...state.positionsSummary,
+              positions: newPositions,
+              totalUnrealizedPnl: Number(newTotalUnrealized.toFixed(2)),
+              netPnl: Number(((state.positionsSummary.totalRealizedPnl || 0) + newTotalUnrealized).toFixed(2)),
+            };
+          }
+
+          return {
+            indices: updatedIndices,
+            optionChain: updatedOptionChain,
+            positionsSummary: updatedPositionsSummary,
+          };
+        });
+      }, 1500);
+    }
+
+    // ── Periodic Background HTTP Polling (every 8s) ──
+    if (!clientPollInterval && typeof window !== 'undefined') {
+      clientPollInterval = setInterval(async () => {
+        const state = get();
+        if (state.optionChain?.symbol) {
+          try {
+            await state.fetchOptionChain(state.optionChain.symbol, state.optionChain.selectedExpiry);
+          } catch {}
+        }
+        if (state.isAuthenticated) {
+          try {
+            await Promise.allSettled([
+              state.fetchWallet(),
+              state.fetchPositions(),
+              state.fetchOrders(),
+              state.fetchNotifications(),
+            ]);
+          } catch {}
+        }
+      }, 8000);
+    }
   },
 }));

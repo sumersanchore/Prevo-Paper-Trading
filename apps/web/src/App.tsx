@@ -20,6 +20,7 @@ const AppContent: React.FC = () => {
     activeTab,
     setActiveTab,
     fetchAllData,
+    fetchOptionChain,
     initSocketListeners,
     checkAuth,
     isAuthenticated,
@@ -59,11 +60,17 @@ const AppContent: React.FC = () => {
     return () => window.removeEventListener('popstate', handlePopState);
   }, [checkAuth, setActiveTab]);
 
+  // Start market ticking + option chain for ALL visitors (guests included)
+  useEffect(() => {
+    initSocketListeners();
+    fetchOptionChain('NIFTY');
+  }, [initSocketListeners, fetchOptionChain]);
+
+  // Fetch full trading data only for authenticated users
   useEffect(() => {
     if (!isAuthenticated) return;
     fetchAllData();
-    initSocketListeners();
-  }, [isAuthenticated, fetchAllData, initSocketListeners]);
+  }, [isAuthenticated, fetchAllData]);
 
   const handleTabClick = (tab: 'option-chain' | 'positions' | 'orders') => {
     setActiveTab(tab);
