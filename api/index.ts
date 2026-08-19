@@ -1,12 +1,11 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { createServer } from '../apps/api/src/http/server.js';
-import { autoMigrateDatabase } from '../packages/database/src/index.js';
 
 let isDbMigrated = false;
 let appInstance: any = null;
 
-function getApp() {
+async function getApp() {
   if (!appInstance) {
+    const { createServer } = await import('../apps/api/src/http/server.js');
     appInstance = createServer();
   }
   return appInstance;
@@ -15,6 +14,7 @@ function getApp() {
 export default async function handler(req: IncomingMessage, res: ServerResponse | any) {
   if (!isDbMigrated && process.env.DATABASE_URL) {
     try {
+      const { autoMigrateDatabase } = await import('../packages/database/src/index.js');
       await autoMigrateDatabase();
       isDbMigrated = true;
     } catch (err: any) {
@@ -23,7 +23,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse 
   }
 
   try {
-    const app = getApp();
+    const app = await getApp();
     return await new Promise<void>((resolve, reject) => {
       res.on('finish', resolve);
       res.on('close', resolve);
