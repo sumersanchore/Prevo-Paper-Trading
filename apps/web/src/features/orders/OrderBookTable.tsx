@@ -8,13 +8,10 @@ import {
   X,
   Plus,
   Minus,
-  Info,
-  ChevronRight,
   ArrowLeft,
   ShieldAlert,
   Clock,
   AlertTriangle,
-  RotateCcw,
 } from 'lucide-react';
 const formatDisplaySymbol = (sym?: string) => {
   if (!sym) return '';
@@ -50,9 +47,6 @@ export const OrderBookTable: React.FC = () => {
   } = useTradingStore();
 
   const [filter, setFilter] = useState<'ALL' | 'EXECUTED' | 'PENDING' | 'REJECTED' | 'CANCELLED'>('ALL');
-
-  // Bottom action sheet for clicked pending order (Screenshot 1)
-  const [activeSheetOrder, setActiveSheetOrder] = useState<OptionOrderEntity | null>(null);
 
   // Full-screen / Modal state for modifying pending order (Screenshots 2 & 4)
   const [modifyingOrder, setModifyingOrder] = useState<OptionOrderEntity | null>(null);
@@ -147,7 +141,6 @@ export const OrderBookTable: React.FC = () => {
   // Open Modify dialog
   const handleOpenModify = (order: OptionOrderEntity, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
-    setActiveSheetOrder(null);
     setModifyingOrder(order);
     setErrorMsg('');
     const lotSize = getLotSize(order);
@@ -158,25 +151,6 @@ export const OrderBookTable: React.FC = () => {
     setEditTargetPrice(order.targetPrice !== undefined && order.targetPrice !== null ? String(order.targetPrice) : '');
     setEditTrailingStopLoss(order.trailingStopLoss !== undefined && order.trailingStopLoss !== null ? String(order.trailingStopLoss) : '20.0');
     setIsTrailEnabled(Boolean(order.trailingStopLoss && order.trailingStopLoss > 0));
-  };
-
-  // Convert Limit Order to Immediate Market Execution ("Buy/Sell at market price")
-  const handleExecuteAtMarket = async (order: OptionOrderEntity) => {
-    try {
-      const livePrice = getLiveLtp(order);
-      await modifyOrder(order.id, {
-        price: livePrice > 0 ? livePrice : undefined,
-      });
-      toast.success(
-        'Order Converted to Market',
-        `Order #${order.id} updated to live market price ₹${formatNumber(livePrice)}`
-      );
-      setActiveSheetOrder(null);
-    } catch (err: any) {
-      const msg = err?.response?.data?.error?.message || err?.message || 'Failed to convert order to market price.';
-      setErrorMsg(msg);
-      toast.error('Market Conversion Failed', msg);
-    }
   };
 
   const handleSaveModify = async () => {
@@ -913,7 +887,6 @@ export const OrderBookTable: React.FC = () => {
                     await cancelOrder(orderToCancel.id);
                     toast.info('Order Cancelled', `Order #${orderToCancel.id} has been cancelled.`);
                     setOrderToCancel(null);
-                    setActiveSheetOrder(null);
                   } catch (err: any) {
                     toast.error('Cancel Failed', err?.message || 'Failed to cancel order.');
                   } finally {
@@ -968,7 +941,6 @@ export const OrderBookTable: React.FC = () => {
                     await cancelAllOrders();
                     toast.info('Orders Cancelled', `Cancelled all ${pendingOrdersCount} pending orders.`);
                     setShowCancelAllConfirm(false);
-                    setActiveSheetOrder(null);
                   } catch (err: any) {
                     toast.error('Cancel Failed', err?.message || 'Failed to cancel orders.');
                   } finally {

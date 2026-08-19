@@ -12,7 +12,7 @@ import { OrderBookTable } from './features/orders/OrderBookTable.js';
 import { NotificationsModal } from './components/layout/NotificationsModal.js';
 import { OnboardingModal } from './features/onboarding/OnboardingModal.js';
 import { ToastProvider } from './components/ui/Toast.js';
-import { Activity, Shield, Sparkles, Lock, Heart } from 'lucide-react';
+import { Activity, Lock } from 'lucide-react';
 import { useTradingStore } from './app/store/useTradingStore.js';
 
 const AppContent: React.FC = () => {

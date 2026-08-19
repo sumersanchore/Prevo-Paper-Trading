@@ -30,7 +30,7 @@ export function createServer(): Application {
   app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
   // Health check routes
-  app.get(['/api/health', '/health'], (req, res) => {
+  app.get(['/api/health', '/health'], (_req, res) => {
     res.json({
       status: 'healthy',
       platform: 'PREVO',

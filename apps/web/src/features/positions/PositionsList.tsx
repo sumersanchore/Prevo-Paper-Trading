@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState } from 'react';
 import { useTradingStore } from '../../app/store/useTradingStore.js';
 import { formatINR, formatNumber } from '../../lib/utils.js';
 import { ActivePositionModal } from './ActivePositionModal.js';
@@ -22,11 +22,9 @@ export const PositionsList: React.FC = () => {
     positionsSummary,
     setActiveTab,
     openOrderPad,
-    exitPosition,
     exitAllPositions,
     placeOrder,
     isLoading,
-    wallet,
   } = useTradingStore();
 
   const [selectedPositionForDetail, setSelectedPositionForDetail] = useState<any | null>(null);

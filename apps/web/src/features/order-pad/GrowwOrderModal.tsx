@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ArrowLeft, X, Plus, Minus, ShieldAlert, CheckCircle2, RotateCw, Settings, Info, Receipt } from 'lucide-react';
+import { ArrowLeft, X, Plus, Minus, ShieldAlert, CheckCircle2, Settings, Info, Receipt } from 'lucide-react';
 import { useTradingStore } from '../../app/store/useTradingStore.js';
 import { useToast } from '../../components/ui/Toast.js';
 import { formatINR, formatNumber } from '../../lib/utils.js';

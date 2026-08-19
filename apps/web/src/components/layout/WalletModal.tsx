@@ -326,7 +326,7 @@ export const WalletModal: React.FC = () => {
 
             {/* Actions */}
             <div className="flex items-center gap-2.5 pt-1">
-              {/* <button
+              <button
                 type="button"
                 onClick={handleReset}
                 disabled={isResetting}
@@ -334,7 +334,7 @@ export const WalletModal: React.FC = () => {
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${isResetting ? 'animate-spin text-[#008f6b]' : ''}`} />
                 <span>Reset to ₹10,00,000</span>
-              </button> */}
+              </button>
               <button
                 type="button"
                 onClick={() => setWalletModalOpen(false)}
